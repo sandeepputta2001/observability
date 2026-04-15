@@ -1,0 +1,17 @@
+{{define "traces-partial.html"}}
+<table>
+  <thead><tr><th>Trace ID</th><th>Duration</th><th>Error</th><th>Spans</th></tr></thead>
+  <tbody>
+    {{range .}}
+    <tr>
+      <td><code>{{.TraceID}}</code></td>
+      <td>{{len .Spans}} spans</td>
+      <td>-</td>
+      <td>{{len .Spans}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="4">No traces found</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

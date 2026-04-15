@@ -1,0 +1,279 @@
+################################################################################
+# GoSentinel Pipeline — Production Deployment
+# Patterns: PodDisruptionBudget, HPA, TopologySpreadConstraints,
+#           SeccompProfile, readOnlyRootFilesystem, resource quotas
+################################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gosentinel-pipeline
+  namespace: gosentinel
+  labels:
+    app.kubernetes.io/name: gosentinel-pipeline
+    app.kubernetes.io/component: pipeline
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/part-of: gosentinel
+  annotations:
+    # Observability pattern: deployment annotations for change tracking
+    deployment.kubernetes.io/revision: "1"
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gosentinel-pipeline
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gosentinel-pipeline
+        app.kubernetes.io/component: pipeline
+        app.kubernetes.io/version: "0.1.0"
+      annotations:
+        # Prometheus scrape annotations (observability pattern: pull-based metrics)
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+        # Pyroscope continuous profiling annotations
+        pyroscope.io/scrape: "true"
+        pyroscope.io/application-name: "gosentinel-pipeline"
+        pyroscope.io/profile-cpu-enabled: "true"
+        pyroscope.io/profile-mem-enabled: "true"
+    spec:
+      serviceAccountName: gosentinel-pipeline
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Topology spread: distribute across AZs and nodes
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: gosentinel-pipeline
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: gosentinel-pipeline
+
+      # Anti-affinity: never co-locate pipeline replicas
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: gosentinel-pipeline
+              topologyKey: kubernetes.io/hostname
+
+      terminationGracePeriodSeconds: 60
+
+      initContainers:
+        - name: wait-for-victoriametrics
+          image: busybox:1.36
+          command: ["sh", "-c", "until wget -q -O- http://victoriametrics:8428/health; do echo waiting; sleep 2; done"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+
+      containers:
+        - name: pipeline
+          image: gosentinel/pipeline:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http-metrics
+              containerPort: 9090
+              protocol: TCP
+
+          env:
+            - name: GOSENTINEL_SERVICE_NAME
+              value: gosentinel-pipeline
+            - name: GOSENTINEL_OTLP_ENDPOINT
+              value: otel-collector:4317
+            - name: GOSENTINEL_VICTORIA_METRICS_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: victoria_metrics_endpoint
+            - name: GOSENTINEL_LOKI_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: loki_endpoint
+            - name: GOSENTINEL_JAEGER_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: jaeger_endpoint
+            - name: GOSENTINEL_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: postgres_dsn
+            - name: GOSENTINEL_ALERTING_SLACK_WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: slack_webhook
+                  optional: true
+            - name: GOSENTINEL_ALERTING_PAGERDUTY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: pagerduty_key
+                  optional: true
+            # Pod identity for trace correlation
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http-metrics
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http-metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http-metrics
+            failureThreshold: 30
+            periodSeconds: 5
+
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+
+      volumes:
+        - name: config
+          configMap:
+            name: gosentinel-alert-rules
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gosentinel-pipeline
+  namespace: gosentinel
+  labels:
+    app.kubernetes.io/name: gosentinel-pipeline
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+spec:
+  selector:
+    app.kubernetes.io/name: gosentinel-pipeline
+  ports:
+    - name: http-metrics
+      port: 9090
+      targetPort: http-metrics
+  type: ClusterIP
+---
+# PodDisruptionBudget: ensure at least 1 pipeline replica during disruptions
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gosentinel-pipeline-pdb
+  namespace: gosentinel
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gosentinel-pipeline
+---
+# HorizontalPodAutoscaler: scale on CPU + custom metric (correlation_events_total rate)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gosentinel-pipeline-hpa
+  namespace: gosentinel
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gosentinel-pipeline
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60

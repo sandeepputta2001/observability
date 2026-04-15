@@ -1,0 +1,76 @@
+################################################################################
+# ConfigMaps and Secrets for GoSentinel
+################################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gosentinel-config
+  namespace: gosentinel
+data:
+  otlp_endpoint:               "otel-collector.gosentinel.svc.cluster.local:4317"
+  victoria_metrics_endpoint:   "http://victoriametrics.gosentinel.svc.cluster.local:8428"
+  jaeger_endpoint:             "jaeger-query.gosentinel.svc.cluster.local:16685"
+  loki_endpoint:               "http://loki.gosentinel.svc.cluster.local:3100"
+  pyroscope_endpoint:          "http://pyroscope.gosentinel.svc.cluster.local:4040"
+  api_addr:                    "http://gosentinel-api.gosentinel.svc.cluster.local:8080"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gosentinel-alert-rules
+  namespace: gosentinel
+data:
+  alert-rules.yaml: |
+    rules:
+      - name: "High error rate"
+        expr: 'rate(http_requests_total{status=~"5.."}[5m]) > 0.05'
+        for: 2m
+        severity: critical
+        annotations:
+          summary: "Service error rate above 5%"
+        notify: [slack, pagerduty]
+
+      - name: "High p99 latency"
+        expr: 'histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 1.0'
+        for: 5m
+        severity: warning
+        annotations:
+          summary: "P99 latency above 1 second"
+        notify: [slack]
+
+      - name: "Service down"
+        expr: 'up == 0'
+        for: 1m
+        severity: critical
+        annotations:
+          summary: "Service is down"
+        notify: [slack, pagerduty]
+
+      - name: "Error budget burn rate fast"
+        expr: 'gosentinel_slo_burn_rate > 14.4'
+        for: 2m
+        severity: critical
+        annotations:
+          summary: "SLO fast burn rate exceeded (2% budget in 1h)"
+        notify: [slack, pagerduty]
+
+      - name: "Anomaly detected"
+        expr: 'gosentinel_anomaly_z_score > 3'
+        for: 0s
+        severity: warning
+        annotations:
+          summary: "EWMA anomaly detected"
+        notify: [slack]
+---
+# Secret template — in production, use External Secrets Operator or Sealed Secrets
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gosentinel-secrets
+  namespace: gosentinel
+type: Opaque
+stringData:
+  postgres_dsn:   "postgres://gosentinel:CHANGE_ME@postgres:5432/gosentinel?sslmode=require"
+  jwt_secret:     "CHANGE_ME_IN_PRODUCTION_USE_32_CHARS_MIN"
+  slack_webhook:  ""
+  pagerduty_key:  ""

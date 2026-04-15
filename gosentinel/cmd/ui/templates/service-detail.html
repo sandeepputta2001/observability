@@ -1,0 +1,45 @@
+{{template "layout.html" .}}
+{{define "content"}}
+<h2>Service: {{.Service}}</h2>
+<div class="grid">
+  <!-- Panel 1: Recent Traces -->
+  <article>
+    <header>Recent Traces</header>
+    <div hx-get="/partials/service/{{.Service}}/traces"
+         hx-trigger="load, every 30s"
+         hx-swap="innerHTML">
+      <p aria-busy="true">Loading traces...</p>
+    </div>
+  </article>
+
+  <!-- Panel 2: Metrics -->
+  <article>
+    <header>Metrics</header>
+    <div hx-get="/partials/service/{{.Service}}/metrics"
+         hx-trigger="load, every 30s"
+         hx-swap="innerHTML">
+      <p aria-busy="true">Loading metrics...</p>
+    </div>
+  </article>
+
+  <!-- Panel 3: Logs -->
+  <article>
+    <header>Recent Logs</header>
+    <div hx-get="/partials/service/{{.Service}}/logs"
+         hx-trigger="load, every 30s"
+         hx-swap="innerHTML">
+      <p aria-busy="true">Loading logs...</p>
+    </div>
+  </article>
+
+  <!-- Panel 4: CPU Profile -->
+  <article>
+    <header>CPU Profile</header>
+    <div hx-get="/partials/service/{{.Service}}/profile"
+         hx-trigger="load, every 30s"
+         hx-swap="innerHTML">
+      <p aria-busy="true">Loading profile...</p>
+    </div>
+  </article>
+</div>
+{{end}}

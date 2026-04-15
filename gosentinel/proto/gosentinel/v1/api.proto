@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package gosentinel.v1;
+
+option go_package = "github.com/yourorg/gosentinel/gen/go/gosentinel/v1;gosentinelv1";
+
+import "gosentinel/v1/types.proto";
+import "google/protobuf/timestamp.proto";
+
+// QueryService provides unified observability queries across all signal types.
+service QueryService {
+  // GetServiceHealth returns a comprehensive health snapshot for a service.
+  rpc GetServiceHealth(GetServiceHealthRequest) returns (GetServiceHealthResponse);
+  // GetCorrelatedTrace returns a trace enriched with correlated metrics and logs.
+  rpc GetCorrelatedTrace(GetCorrelatedTraceRequest) returns (GetCorrelatedTraceResponse);
+  // ListAnomalies returns recent anomaly events, optionally filtered by service.
+  rpc ListAnomalies(ListAnomaliesRequest) returns (ListAnomaliesResponse);
+  // StreamAlerts opens a server-streaming RPC that pushes alert events in real time.
+  rpc StreamAlerts(StreamAlertsRequest) returns (stream AlertEvent);
+}
+
+// SLOService provides SLO and error budget queries.
+service SLOService {
+  // ListSLOs returns all configured SLOs with current burn rates.
+  rpc ListSLOs(ListSLOsRequest) returns (ListSLOsResponse);
+  // GetErrorBudget returns the current error budget status for a specific SLO.
+  rpc GetErrorBudget(GetErrorBudgetRequest) returns (GetErrorBudgetResponse);
+}
+
+// GetServiceHealthRequest specifies which service and time window to query.
+message GetServiceHealthRequest {
+  string service = 1;
+  // lookback_minutes is how far back to query (default 60).
+  int32 lookback_minutes = 2;
+}
+
+// GetServiceHealthResponse contains a full health snapshot for a service.
+message GetServiceHealthResponse {
+  string service          = 1;
+  double error_rate       = 2;
+  double p50_latency_ms   = 3;
+  double p95_latency_ms   = 4;
+  double p99_latency_ms   = 5;
+  double request_rate     = 6;
+  int32  active_alerts    = 7;
+  repeated SpanSummary    top_error_spans    = 8;
+  repeated AnomalyEvent   recent_anomalies   = 9;
+  string cpu_hotspot_function = 10;
+  google.protobuf.Timestamp queried_at = 11;
+}
+
+// GetCorrelatedTraceRequest specifies a trace to enrich.
+message GetCorrelatedTraceRequest {
+  string trace_id = 1;
+}
+
+// GetCorrelatedTraceResponse contains the enriched correlated event.
+message GetCorrelatedTraceResponse {
+  CorrelatedEvent event = 1;
+}
+
+// ListAnomaliesRequest filters anomaly results.
+message ListAnomaliesRequest {
+  string service   = 1;
+  int32  limit     = 2;
+  google.protobuf.Timestamp since = 3;
+}
+
+// ListAnomaliesResponse contains a list of anomaly events.
+message ListAnomaliesResponse {
+  repeated AnomalyEvent anomalies = 1;
+}
+
+// StreamAlertsRequest filters the alert stream.
+message StreamAlertsRequest {
+  // service filters alerts to a specific service; empty means all services.
+  string service  = 1;
+  // severity filters alerts by minimum severity (info|warning|critical).
+  string severity = 2;
+}
+
+// ListSLOsRequest is currently empty (returns all SLOs).
+message ListSLOsRequest {}
+
+// ListSLOsResponse contains all configured SLOs.
+message ListSLOsResponse {
+  repeated SLO slos = 1;
+}
+
+// GetErrorBudgetRequest specifies which SLO to query.
+message GetErrorBudgetRequest {
+  string slo_name = 1;
+  string service  = 2;
+}
+
+// GetErrorBudgetResponse contains the current error budget status.
+message GetErrorBudgetResponse {
+  SLO                       slo         = 1;
+  repeated BurnRateViolation violations  = 2;
+  google.protobuf.Timestamp  queried_at  = 3;
+}

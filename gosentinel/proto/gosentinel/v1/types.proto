@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+package gosentinel.v1;
+
+option go_package = "github.com/yourorg/gosentinel/gen/go/gosentinel/v1;gosentinelv1";
+
+import "google/protobuf/timestamp.proto";
+
+// SpanSummary is a condensed representation of a trace span.
+message SpanSummary {
+  string trace_id   = 1;
+  string span_id    = 2;
+  string operation  = 3;
+  string service    = 4;
+  double duration_ms = 5;
+  bool   error      = 6;
+  string status_message = 7;
+}
+
+// CorrelatedEvent joins a trace, metric snapshot, and log line on a common trace_id.
+message CorrelatedEvent {
+  string                     trace_id    = 1;
+  string                     service     = 2;
+  google.protobuf.Timestamp  timestamp   = 3;
+  SpanSummary                span        = 4;
+  repeated MetricSample      metrics     = 5;
+  repeated LogEntry          logs        = 6;
+}
+
+// MetricSample is a single metric observation.
+message MetricSample {
+  string name   = 1;
+  double value  = 2;
+  map<string, string> labels = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+// LogEntry is a single structured log line.
+message LogEntry {
+  google.protobuf.Timestamp timestamp = 1;
+  string level    = 2;
+  string message  = 3;
+  string service  = 4;
+  string trace_id = 5;
+  map<string, string> fields = 6;
+}
+
+// AnomalyEvent represents a detected anomaly from the EWMA detector.
+message AnomalyEvent {
+  string                    id          = 1;
+  string                    service     = 2;
+  string                    metric_name = 3;
+  double                    value       = 4;
+  double                    z_score     = 5;
+  google.protobuf.Timestamp detected_at = 6;
+  string                    severity    = 7;
+}
+
+// AlertRule defines a single alerting rule.
+message AlertRule {
+  string name     = 1;
+  string expr     = 2;
+  string for_duration = 3;
+  string severity = 4;
+  map<string, string> annotations = 5;
+  repeated string notify = 6;
+}
+
+// AlertEvent represents a fired or resolved alert.
+message AlertEvent {
+  string                    id          = 1;
+  string                    rule_name   = 2;
+  string                    state       = 3; // pending | firing | resolved
+  string                    severity    = 4;
+  string                    summary     = 5;
+  string                    service     = 6;
+  double                    value       = 7;
+  google.protobuf.Timestamp fired_at    = 8;
+  google.protobuf.Timestamp resolved_at = 9;
+  map<string, string> labels = 10;
+}
+
+// SLO defines a service level objective.
+message SLO {
+  string name        = 1;
+  string service     = 2;
+  double target      = 3;
+  string window      = 4;
+  double error_budget_remaining = 5;
+  double burn_rate   = 6;
+}
+
+// BurnRateViolation represents a multi-window burn rate alert.
+message BurnRateViolation {
+  string slo_name      = 1;
+  string service       = 2;
+  double burn_rate     = 3;
+  string short_window  = 4;
+  string long_window   = 5;
+  string severity      = 6;
+  google.protobuf.Timestamp detected_at = 7;
+}
+
+// FunctionSample represents a profiling sample for a single function.
+message FunctionSample {
+  string function_name = 1;
+  string file          = 2;
+  int64  self_ns       = 3;
+  int64  total_ns      = 4;
+  double self_percent  = 5;
+}

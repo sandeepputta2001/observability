@@ -1,0 +1,301 @@
+version: "3.9"
+
+networks:
+  gosentinel:
+    driver: bridge
+
+volumes:
+  jaeger-data:
+  victoriametrics-data:
+  loki-data:
+  pyroscope-data:
+  grafana-data:
+  postgres-data:
+  prometheus-data:
+
+services:
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # UI
+      - "4317:4317"     # OTLP gRPC (internal, exposed for debugging)
+      - "16685:16685"   # gRPC query API
+    volumes:
+      - jaeger-data:/tmp
+    networks: [gosentinel]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:14269/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.99.0
+    container_name: victoriametrics
+    command:
+      - -storageDataPath=/storage
+      - -retentionPeriod=30d
+    ports:
+      - "8428:8428"
+    volumes:
+      - victoriametrics-data:/storage
+    networks: [gosentinel]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8428/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  loki:
+    image: grafana/loki:2.9.7
+    container_name: loki
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki-data:/loki
+    networks: [gosentinel]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pyroscope:
+    image: grafana/pyroscope:1.5.0
+    container_name: pyroscope
+    ports:
+      - "4040:4040"
+    volumes:
+      - pyroscope-data:/data
+    networks: [gosentinel]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4040/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-remote-write-receiver
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks: [gosentinel]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: gosentinel
+      POSTGRES_PASSWORD: gosentinel
+      POSTGRES_DB: gosentinel
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [gosentinel]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gosentinel"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.99.0
+    container_name: otel-collector
+    command: ["--config=/etc/otel/config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Collector metrics
+    volumes:
+      - ./config/otel-collector.yaml:/etc/otel/config.yaml:ro
+    networks: [gosentinel]
+    depends_on:
+      jaeger:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks: [gosentinel]
+    depends_on:
+      - victoriametrics
+      - loki
+      - jaeger
+      - pyroscope
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Example Services ────────────────────────────────────────────────────────
+
+  order-service:
+    build:
+      context: .
+      dockerfile: examples/services/order-service/Dockerfile
+    container_name: order-service
+    environment:
+      OTLP_ENDPOINT: otel-collector:4317
+      PYROSCOPE_ENDPOINT: http://pyroscope:4040
+    ports:
+      - "8081:8081"
+    networks: [gosentinel]
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: examples/services/inventory-service/Dockerfile
+    container_name: inventory-service
+    environment:
+      OTLP_ENDPOINT: otel-collector:4317
+      PYROSCOPE_ENDPOINT: http://pyroscope:4040
+    ports:
+      - "8082:8082"
+    networks: [gosentinel]
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: examples/services/payment-service/Dockerfile
+    container_name: payment-service
+    environment:
+      OTLP_ENDPOINT: otel-collector:4317
+      PYROSCOPE_ENDPOINT: http://pyroscope:4040
+    ports:
+      - "8083:8083"
+    networks: [gosentinel]
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8083/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── GoSentinel Binaries ─────────────────────────────────────────────────────
+
+  gosentinel-pipeline:
+    build:
+      context: .
+      dockerfile: deploy/docker/pipeline.Dockerfile
+    container_name: gosentinel-pipeline
+    environment:
+      GOSENTINEL_OTLP_ENDPOINT: otel-collector:4317
+      GOSENTINEL_VICTORIA_METRICS_ENDPOINT: http://victoriametrics:8428
+      GOSENTINEL_LOKI_ENDPOINT: http://loki:3100
+      GOSENTINEL_JAEGER_ENDPOINT: jaeger:16685
+      GOSENTINEL_POSTGRES_DSN: postgres://gosentinel:gosentinel@postgres:5432/gosentinel?sslmode=disable
+    ports:
+      - "9091:9090"
+    networks: [gosentinel]
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  gosentinel-api:
+    build:
+      context: .
+      dockerfile: deploy/docker/api.Dockerfile
+    container_name: gosentinel-api
+    environment:
+      GOSENTINEL_OTLP_ENDPOINT: otel-collector:4317
+      GOSENTINEL_VICTORIA_METRICS_ENDPOINT: http://victoriametrics:8428
+      GOSENTINEL_LOKI_ENDPOINT: http://loki:3100
+      GOSENTINEL_JAEGER_ENDPOINT: jaeger:16685
+      GOSENTINEL_PYROSCOPE_ENDPOINT: http://pyroscope:4040
+    ports:
+      - "8080:8080"
+    networks: [gosentinel]
+    depends_on:
+      gosentinel-pipeline:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  gosentinel-ui:
+    build:
+      context: .
+      dockerfile: deploy/docker/ui.Dockerfile
+    container_name: gosentinel-ui
+    environment:
+      GOSENTINEL_OTLP_ENDPOINT: otel-collector:4317
+      GOSENTINEL_VICTORIA_METRICS_ENDPOINT: http://victoriametrics:8428
+      GOSENTINEL_LOKI_ENDPOINT: http://loki:3100
+      GOSENTINEL_JAEGER_ENDPOINT: jaeger:16685
+      GOSENTINEL_PYROSCOPE_ENDPOINT: http://pyroscope:4040
+      GOSENTINEL_UI_API_ADDR: http://gosentinel-api:8080
+    ports:
+      - "3000:3000"
+    networks: [gosentinel]
+    depends_on:
+      gosentinel-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

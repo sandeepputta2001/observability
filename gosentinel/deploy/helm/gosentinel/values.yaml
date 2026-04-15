@@ -1,0 +1,68 @@
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+pipeline:
+  image:
+    repository: gosentinel/pipeline
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  service:
+    port: 9090
+
+api:
+  image:
+    repository: gosentinel/api
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  service:
+    port: 8080
+  jwtSecret: "change-me-in-production"
+  rateLimit: 100
+
+ui:
+  image:
+    repository: gosentinel/ui
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+  service:
+    type: LoadBalancer
+    port: 3000
+
+backends:
+  otlpEndpoint: "otel-collector:4317"
+  victoriaMetricsEndpoint: "http://victoriametrics:8428"
+  jaegerEndpoint: "jaeger:16685"
+  lokiEndpoint: "http://loki:3100"
+  pyroscopeEndpoint: "http://pyroscope:4040"
+
+postgres:
+  dsn: "postgres://gosentinel:gosentinel@postgres:5432/gosentinel?sslmode=disable"
+
+alerting:
+  slackWebhook: ""
+  pagerdutyKey: ""

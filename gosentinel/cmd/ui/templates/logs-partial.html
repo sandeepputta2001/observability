@@ -1,0 +1,14 @@
+{{define "logs-partial.html"}}
+<div style="font-family: monospace; font-size: 0.8rem; max-height: 300px; overflow-y: auto;">
+  {{range .}}
+    {{range .Entries}}
+    <div>
+      <span style="color: gray;">{{.Timestamp.Format "15:04:05"}}</span>
+      {{.Line}}
+    </div>
+    {{end}}
+  {{else}}
+  <p>No log entries found.</p>
+  {{end}}
+</div>
+{{end}}

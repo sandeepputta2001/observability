@@ -1,0 +1,11 @@
+variable "aws_region"          { type = string; default = "us-east-1" }
+variable "owner"               { type = string; default = "platform-team" }
+variable "vpc_cidr"            { type = string; default = "10.0.0.0/16" }
+variable "kubernetes_version"  { type = string; default = "1.29" }
+variable "node_instance_types" { type = list(string); default = ["m5.xlarge"] }
+variable "desired_nodes"       { type = number; default = 3 }
+variable "min_nodes"           { type = number; default = 2 }
+variable "max_nodes"           { type = number; default = 10 }
+variable "db_instance_class"   { type = string; default = "db.t3.medium" }
+variable "allowed_cidrs"       { type = list(string); default = [] }
+variable "image_tag"           { type = string; default = "latest" }

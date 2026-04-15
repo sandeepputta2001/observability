@@ -1,0 +1,39 @@
+rules:
+  - name: "High error rate"
+    expr: 'rate(http_requests_total{status=~"5.."}[5m]) > 0.05'
+    for: 2m
+    severity: critical
+    annotations:
+      summary: "Service error rate above 5%"
+      description: "Error rate is {{ $value | humanize }} req/s"
+    notify:
+      - slack
+      - pagerduty
+
+  - name: "High p99 latency"
+    expr: 'histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 1.0'
+    for: 5m
+    severity: warning
+    annotations:
+      summary: "P99 latency above 1 second"
+    notify:
+      - slack
+
+  - name: "Service down"
+    expr: 'up == 0'
+    for: 1m
+    severity: critical
+    annotations:
+      summary: "Service is down"
+    notify:
+      - slack
+      - pagerduty
+
+  - name: "High memory usage"
+    expr: 'process_resident_memory_bytes > 500000000'
+    for: 10m
+    severity: warning
+    annotations:
+      summary: "Process memory above 500MB"
+    notify:
+      - slack

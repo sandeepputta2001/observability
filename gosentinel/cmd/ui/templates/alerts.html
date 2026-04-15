@@ -1,0 +1,40 @@
+{{template "layout.html" .}}
+{{define "content"}}
+<h2>Alerts</h2>
+<p>Real-time alerts appear in the bottom-right corner via SSE. Historical alerts will appear here.</p>
+<div id="alert-list" x-data="alertList()" x-init="init()">
+  <template x-for="alert in alerts" :key="alert.id">
+    <article>
+      <header>
+        <span x-text="alert.rule_name"></span>
+        <span x-text="alert.state" style="float:right"></span>
+      </header>
+      <p x-text="alert.summary"></p>
+      <footer>
+        Severity: <span x-text="alert.severity"></span> |
+        Fired: <span x-text="new Date(alert.fired_at).toLocaleString()"></span>
+      </footer>
+    </article>
+  </template>
+  <p x-show="alerts.length === 0">No active alerts.</p>
+</div>
+<script>
+  function alertList() {
+    return {
+      alerts: [],
+      init() {
+        const es = new EventSource('/sse/alerts');
+        es.onmessage = (e) => {
+          const alert = JSON.parse(e.data);
+          const idx = this.alerts.findIndex(a => a.rule_name === alert.rule_name);
+          if (idx >= 0) {
+            this.alerts[idx] = alert;
+          } else {
+            this.alerts.unshift(alert);
+          }
+        };
+      }
+    }
+  }
+</script>
+{{end}}

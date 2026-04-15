@@ -1,0 +1,9 @@
+{{template "layout.html" .}}
+{{define "content"}}
+<h2>Service Map</h2>
+<div hx-get="/partials/service-table"
+     hx-trigger="load, every 15s"
+     hx-swap="innerHTML">
+  <p aria-busy="true">Loading services...</p>
+</div>
+{{end}}

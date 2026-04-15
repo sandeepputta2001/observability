@@ -1,0 +1,106 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: order-service
+          scrape_interval: 15s
+          static_configs:
+            - targets: [order-service:8081]
+        - job_name: inventory-service
+          scrape_interval: 15s
+          static_configs:
+            - targets: [inventory-service:8082]
+        - job_name: payment-service
+          scrape_interval: 15s
+          static_configs:
+            - targets: [payment-service:8083]
+        - job_name: gosentinel-pipeline
+          scrape_interval: 15s
+          static_configs:
+            - targets: [gosentinel-pipeline:9090]
+        - job_name: gosentinel-api
+          scrape_interval: 15s
+          static_configs:
+            - targets: [gosentinel-api:8080]
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: local
+        action: insert
+      - key: k8s.cluster.name
+        value: gosentinel-local
+        action: insert
+
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 100
+    expected_new_traces_per_sec: 10
+    policies:
+      - name: always-sample-errors
+        type: status_code
+        status_code: {status_codes: [ERROR]}
+      - name: probabilistic-10pct
+        type: probabilistic
+        probabilistic: {sampling_percentage: 10}
+      - name: high-latency
+        type: latency
+        latency: {threshold_ms: 500}
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  prometheusremotewrite:
+    endpoint: http://victoriametrics:8428/api/v1/write
+    tls:
+      insecure: true
+
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    tls:
+      insecure: true
+
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, tail_sampling]
+      exporters: [otlp/jaeger]
+
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [memory_limiter, batch]
+      exporters: [prometheusremotewrite]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [loki]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888

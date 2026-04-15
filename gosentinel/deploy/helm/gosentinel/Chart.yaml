@@ -1,0 +1,15 @@
+apiVersion: v2
+name: gosentinel
+description: GoSentinel — self-hosted observability platform for Go microservices
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - observability
+  - tracing
+  - metrics
+  - logs
+  - profiling
+maintainers:
+  - name: GoSentinel Team
+    email: team@gosentinel.io

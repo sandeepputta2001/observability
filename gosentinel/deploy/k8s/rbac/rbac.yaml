@@ -1,0 +1,84 @@
+################################################################################
+# RBAC — Least-privilege service accounts for all GoSentinel workloads
+################################################################################
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gosentinel-pipeline
+  namespace: gosentinel
+  annotations:
+    # IRSA annotation — set by Terraform in production
+    eks.amazonaws.com/role-arn: ""
+  labels:
+    app.kubernetes.io/name: gosentinel-pipeline
+    app.kubernetes.io/component: pipeline
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gosentinel-api
+  namespace: gosentinel
+  labels:
+    app.kubernetes.io/name: gosentinel-api
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gosentinel-ui
+  namespace: gosentinel
+  labels:
+    app.kubernetes.io/name: gosentinel-ui
+automountServiceAccountToken: false
+---
+# Role: pipeline needs to read ConfigMaps and Secrets
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gosentinel-pipeline-role
+  namespace: gosentinel
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gosentinel-pipeline-rolebinding
+  namespace: gosentinel
+subjects:
+  - kind: ServiceAccount
+    name: gosentinel-pipeline
+    namespace: gosentinel
+roleRef:
+  kind: Role
+  name: gosentinel-pipeline-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# ClusterRole: read node metrics for USE method (CPU/memory/disk per node)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gosentinel-node-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/metrics", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gosentinel-node-reader-binding
+subjects:
+  - kind: ServiceAccount
+    name: gosentinel-pipeline
+    namespace: gosentinel
+roleRef:
+  kind: ClusterRole
+  name: gosentinel-node-reader
+  apiGroup: rbac.authorization.k8s.io

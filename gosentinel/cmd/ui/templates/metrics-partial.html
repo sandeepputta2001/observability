@@ -1,0 +1,13 @@
+{{define "metrics-partial.html"}}
+{{if .}}
+<svg viewBox="0 0 300 60" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Request rate sparkline">
+  {{range $i, $r := .}}
+    {{range $j, $p := $r.Values}}
+      <circle cx="{{mul $j 10}}" cy="{{sub 55 (mul $p.Value 5)}}" r="2" fill="steelblue"/>
+    {{end}}
+  {{end}}
+</svg>
+{{else}}
+<p>No metric data available.</p>
+{{end}}
+{{end}}

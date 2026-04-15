@@ -1,0 +1,18 @@
+{{define "profile-partial.html"}}
+{{if .}}
+<table>
+  <thead><tr><th>Function</th><th>Self %</th><th>Self ns</th></tr></thead>
+  <tbody>
+    {{range .}}
+    <tr>
+      <td><code>{{.FunctionName}}</code></td>
+      <td>{{printf "%.2f%%" .SelfPercent}}</td>
+      <td>{{.SelfNs}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p>No profile data available.</p>
+{{end}}
+{{end}}

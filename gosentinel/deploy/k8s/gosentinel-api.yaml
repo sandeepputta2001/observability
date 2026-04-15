@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gosentinel-api
+  namespace: gosentinel
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gosentinel-api
+  template:
+    metadata:
+      labels:
+        app: gosentinel-api
+    spec:
+      containers:
+        - name: api
+          image: gosentinel/api:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GOSENTINEL_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: otlp_endpoint
+            - name: GOSENTINEL_VICTORIA_METRICS_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: victoria_metrics_endpoint
+            - name: GOSENTINEL_JAEGER_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: jaeger_endpoint
+            - name: GOSENTINEL_API_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: jwt_secret
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gosentinel-api
+  namespace: gosentinel
+spec:
+  selector:
+    app: gosentinel-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

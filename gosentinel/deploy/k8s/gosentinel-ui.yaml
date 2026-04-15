@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gosentinel-ui
+  namespace: gosentinel
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gosentinel-ui
+  template:
+    metadata:
+      labels:
+        app: gosentinel-ui
+    spec:
+      containers:
+        - name: ui
+          image: gosentinel/ui:latest
+          ports:
+            - containerPort: 3000
+          env:
+            - name: GOSENTINEL_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: otlp_endpoint
+            - name: GOSENTINEL_UI_API_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: api_addr
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gosentinel-ui
+  namespace: gosentinel
+spec:
+  selector:
+    app: gosentinel-ui
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+  type: LoadBalancer
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gosentinel-config
+  namespace: gosentinel
+data:
+  otlp_endpoint: "otel-collector:4317"
+  victoria_metrics_endpoint: "http://victoriametrics:8428"
+  jaeger_endpoint: "jaeger:16685"
+  loki_endpoint: "http://loki:3100"
+  pyroscope_endpoint: "http://pyroscope:4040"
+  api_addr: "http://gosentinel-api:8080"

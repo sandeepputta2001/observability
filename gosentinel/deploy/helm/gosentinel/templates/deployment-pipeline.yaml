@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gosentinel.fullname" . }}-pipeline
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gosentinel.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pipeline
+spec:
+  replicas: {{ .Values.pipeline.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "gosentinel.fullname" . }}-pipeline
+  template:
+    metadata:
+      labels:
+        app: {{ include "gosentinel.fullname" . }}-pipeline
+    spec:
+      containers:
+        - name: pipeline
+          image: "{{ .Values.pipeline.image.repository }}:{{ .Values.pipeline.image.tag }}"
+          imagePullPolicy: {{ .Values.pipeline.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.pipeline.service.port }}
+          env:
+            - name: GOSENTINEL_OTLP_ENDPOINT
+              value: {{ .Values.backends.otlpEndpoint | quote }}
+            - name: GOSENTINEL_VICTORIA_METRICS_ENDPOINT
+              value: {{ .Values.backends.victoriaMetricsEndpoint | quote }}
+            - name: GOSENTINEL_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gosentinel.fullname" . }}-secrets
+                  key: postgres_dsn
+          resources:
+            {{- toYaml .Values.pipeline.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.pipeline.service.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.pipeline.service.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 5

@@ -1,0 +1,26 @@
+{{define "service-table-partial.html"}}
+<table role="grid">
+  <thead>
+    <tr>
+      <th>Service</th>
+      <th>Error Rate</th>
+      <th>P99 Latency</th>
+      <th>Request Rate</th>
+      <th>Alerts</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .}}
+    <tr>
+      <td><a href="/services/{{.Name}}">{{.Name}}</a></td>
+      <td class="{{.ErrorClass}}">{{printf "%.2f%%" (mul .ErrorRate 100)}}</td>
+      <td class="{{.LatencyClass}}">{{printf "%.0fms" .P99LatencyMs}}</td>
+      <td>{{printf "%.1f rps" .RequestRate}}</td>
+      <td>{{.ActiveAlerts}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="5">No services found</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

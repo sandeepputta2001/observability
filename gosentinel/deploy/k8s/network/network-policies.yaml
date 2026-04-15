@@ -1,0 +1,96 @@
+################################################################################
+# NetworkPolicies — Zero-trust network segmentation for GoSentinel
+# Pattern: Default-deny + explicit allow (defense in depth)
+################################################################################
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: gosentinel
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Allow DNS egress for all pods
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: gosentinel
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# GoSentinel API — allow ingress from ingress controller + pipeline
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gosentinel-api-ingress
+  namespace: gosentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gosentinel-api
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gosentinel-ui
+      ports:
+        - port: 8080
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: victoriametrics
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: jaeger
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pyroscope
+      ports:
+        - port: 8428
+        - port: 16685
+        - port: 3100
+        - port: 4040
+---
+# OTel Collector — accept OTLP from all services
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: otel-collector-ingress
+  namespace: gosentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - port: 4317
+        - port: 4318
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: jaeger
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: victoriametrics
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki

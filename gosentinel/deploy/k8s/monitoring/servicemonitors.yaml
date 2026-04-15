@@ -1,0 +1,179 @@
+################################################################################
+# ServiceMonitors — Prometheus Operator scrape targets
+# Pattern: Pull-based metrics collection (Prometheus scrape model)
+################################################################################
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gosentinel-pipeline
+  namespace: gosentinel
+  labels:
+    app.kubernetes.io/name: gosentinel-pipeline
+    release: prometheus  # matches Prometheus Operator selector
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gosentinel-pipeline
+  endpoints:
+    - port: http-metrics
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gosentinel-api
+  namespace: gosentinel
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gosentinel-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+# PrometheusRule — alerting rules for Prometheus Operator
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gosentinel-alerts
+  namespace: gosentinel
+  labels:
+    release: prometheus
+spec:
+  groups:
+    # ── RED Method: Rate, Errors, Duration ───────────────────────────────────
+    - name: gosentinel.red
+      interval: 30s
+      rules:
+        - alert: HighRequestErrorRate
+          expr: |
+            sum(rate(http_requests_total{namespace="gosentinel",status=~"5.."}[5m]))
+            / sum(rate(http_requests_total{namespace="gosentinel"}[5m])) > 0.01
+          for: 2m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "GoSentinel error rate > 1%"
+            runbook: "https://wiki.example.com/runbooks/gosentinel-high-error-rate"
+
+        - alert: HighP99Latency
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{namespace="gosentinel"}[5m])) by (le, service)
+            ) > 1.0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "P99 latency > 1s for {{ $labels.service }}"
+
+        - alert: LowRequestRate
+          expr: |
+            sum(rate(http_requests_total{namespace="gosentinel",service="gosentinel-api"}[5m])) < 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "GoSentinel API request rate unexpectedly low"
+
+    # ── USE Method: Utilization, Saturation, Errors ──────────────────────────
+    - name: gosentinel.use
+      interval: 30s
+      rules:
+        - alert: HighCPUUtilization
+          expr: |
+            sum(rate(container_cpu_usage_seconds_total{namespace="gosentinel"}[5m])) by (pod)
+            / sum(kube_pod_container_resource_limits{namespace="gosentinel",resource="cpu"}) by (pod) > 0.8
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.pod }} CPU utilization > 80%"
+
+        - alert: HighMemoryUtilization
+          expr: |
+            sum(container_memory_working_set_bytes{namespace="gosentinel"}) by (pod)
+            / sum(kube_pod_container_resource_limits{namespace="gosentinel",resource="memory"}) by (pod) > 0.85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.pod }} memory utilization > 85%"
+
+        - alert: PodCrashLooping
+          expr: |
+            rate(kube_pod_container_status_restarts_total{namespace="gosentinel"}[15m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Pod {{ $labels.pod }} is crash-looping"
+
+    # ── Four Golden Signals ───────────────────────────────────────────────────
+    - name: gosentinel.golden-signals
+      interval: 30s
+      rules:
+        # 1. Latency
+        - record: gosentinel:request_latency_p99:5m
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{namespace="gosentinel"}[5m])) by (le, service)
+            )
+
+        # 2. Traffic
+        - record: gosentinel:request_rate:5m
+          expr: |
+            sum(rate(http_requests_total{namespace="gosentinel"}[5m])) by (service)
+
+        # 3. Errors
+        - record: gosentinel:error_rate:5m
+          expr: |
+            sum(rate(http_requests_total{namespace="gosentinel",status=~"5.."}[5m])) by (service)
+            / sum(rate(http_requests_total{namespace="gosentinel"}[5m])) by (service)
+
+        # 4. Saturation
+        - record: gosentinel:cpu_saturation:5m
+          expr: |
+            sum(rate(container_cpu_usage_seconds_total{namespace="gosentinel"}[5m])) by (pod)
+
+    # ── SLO Burn Rate ─────────────────────────────────────────────────────────
+    - name: gosentinel.slo
+      interval: 60s
+      rules:
+        - alert: SLOFastBurn
+          expr: |
+            (
+              sum(rate(http_requests_total{namespace="gosentinel",status=~"5.."}[1h]))
+              / sum(rate(http_requests_total{namespace="gosentinel"}[1h]))
+            ) > (14.4 * 0.001)
+          for: 2m
+          labels:
+            severity: critical
+            slo: api-availability
+          annotations:
+            summary: "SLO fast burn: consuming error budget 14.4x faster than allowed"
+            runbook: "https://wiki.example.com/runbooks/slo-burn-rate"
+
+        - alert: SLOSlowBurn
+          expr: |
+            (
+              sum(rate(http_requests_total{namespace="gosentinel",status=~"5.."}[6h]))
+              / sum(rate(http_requests_total{namespace="gosentinel"}[6h]))
+            ) > (6 * 0.001)
+          for: 15m
+          labels:
+            severity: warning
+            slo: api-availability
+          annotations:
+            summary: "SLO slow burn: consuming error budget 6x faster than allowed"

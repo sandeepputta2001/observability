@@ -1,0 +1,20 @@
+{{template "layout.html" .}}
+{{define "content"}}
+<h2>SLO Dashboard</h2>
+<p>Service Level Objectives and error budget burn rates.</p>
+<table role="grid">
+  <thead>
+    <tr>
+      <th>SLO Name</th>
+      <th>Service</th>
+      <th>Target</th>
+      <th>Error Budget Remaining</th>
+      <th>Burn Rate</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td colspan="6">SLO data will appear here once the pipeline is running.</td></tr>
+  </tbody>
+</table>
+{{end}}
