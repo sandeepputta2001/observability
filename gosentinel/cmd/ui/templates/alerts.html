@@ -1,40 +1,234 @@
 {{template "layout.html" .}}
 {{define "content"}}
-<h2>Alerts</h2>
-<p>Real-time alerts appear in the bottom-right corner via SSE. Historical alerts will appear here.</p>
-<div id="alert-list" x-data="alertList()" x-init="init()">
-  <template x-for="alert in alerts" :key="alert.id">
-    <article>
+<div x-data="alertManager()" x-init="init()">
+
+  <!-- ── Active Alerts ─────────────────────────────────────────────────── -->
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+    <h2 style="margin:0">Active Alerts</h2>
+    <button class="outline" @click="loadActive()" title="Refresh">↻ Refresh</button>
+  </div>
+
+  <table role="grid">
+    <thead>
+      <tr>
+        <th>Rule</th><th>Severity</th><th>Summary</th><th>Value</th><th>Fired At</th><th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      <template x-for="a in active" :key="a.id">
+        <tr>
+          <td x-text="a.rule_name"></td>
+          <td>
+            <span :class="'badge-' + a.severity" x-text="a.severity"></span>
+          </td>
+          <td x-text="a.summary"></td>
+          <td x-text="a.value ? a.value.toFixed(4) : '—'"></td>
+          <td x-text="fmtTime(a.fired_at)"></td>
+          <td>
+            <button class="outline secondary" style="padding:2px 8px;font-size:12px"
+              @click="openSilence(a.rule_name)">Silence</button>
+          </td>
+        </tr>
+      </template>
+      <tr x-show="active.length === 0">
+        <td colspan="6" style="text-align:center;color:#888">✅ No active alerts</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ── Alert History ─────────────────────────────────────────────────── -->
+  <h2>Alert History</h2>
+  <table role="grid">
+    <thead>
+      <tr>
+        <th>Rule</th><th>State</th><th>Severity</th><th>Summary</th><th>Value</th><th>Time</th>
+      </tr>
+    </thead>
+    <tbody>
+      <template x-for="a in history" :key="a.id">
+        <tr>
+          <td x-text="a.rule_name"></td>
+          <td>
+            <span :class="'state-' + a.state" x-text="a.state"></span>
+          </td>
+          <td x-text="a.severity"></td>
+          <td x-text="a.summary"></td>
+          <td x-text="a.value ? a.value.toFixed(4) : '—'"></td>
+          <td x-text="fmtTime(a.fired_at || a.resolved_at)"></td>
+        </tr>
+      </template>
+      <tr x-show="history.length === 0">
+        <td colspan="6" style="text-align:center;color:#888">No alert history yet</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ── Silences ──────────────────────────────────────────────────────── -->
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;margin-top:32px">
+    <h2 style="margin:0">Silences</h2>
+    <button @click="openSilence('')">+ New Silence</button>
+  </div>
+
+  <table role="grid">
+    <thead>
+      <tr><th>ID</th><th>Rule</th><th>Created By</th><th>Comment</th><th>Ends At</th><th>Status</th><th></th></tr>
+    </thead>
+    <tbody>
+      <template x-for="s in silences" :key="s.id">
+        <tr>
+          <td style="font-size:11px;color:#888" x-text="s.id.slice(-12)"></td>
+          <td x-text="s.rule_name || '(all rules)'"></td>
+          <td x-text="s.created_by || '—'"></td>
+          <td x-text="s.comment || '—'"></td>
+          <td x-text="fmtTime(s.ends_at)"></td>
+          <td>
+            <span :class="isActiveSilence(s) ? 'badge-active' : 'badge-expired'"
+              x-text="isActiveSilence(s) ? 'active' : 'expired'"></span>
+          </td>
+          <td>
+            <button class="outline contrast" style="padding:2px 8px;font-size:12px"
+              @click="deleteSilence(s.id)">Delete</button>
+          </td>
+        </tr>
+      </template>
+      <tr x-show="silences.length === 0">
+        <td colspan="7" style="text-align:center;color:#888">No silences configured</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ── Create Silence Modal ──────────────────────────────────────────── -->
+  <dialog id="silence-modal" :open="showSilenceModal">
+    <article style="max-width:480px">
       <header>
-        <span x-text="alert.rule_name"></span>
-        <span x-text="alert.state" style="float:right"></span>
+        <button aria-label="Close" rel="prev" @click="showSilenceModal=false"></button>
+        <h3>Create Silence</h3>
       </header>
-      <p x-text="alert.summary"></p>
+      <label>Rule Name <small>(leave blank to silence all rules)</small>
+        <input type="text" x-model="silenceForm.rule_name" placeholder="e.g. High error rate">
+      </label>
+      <label>Duration <small>(Go duration: 30m, 2h, 1d)</small>
+        <input type="text" x-model="silenceForm.duration" placeholder="2h">
+      </label>
+      <label>Created By
+        <input type="text" x-model="silenceForm.created_by" placeholder="your-name">
+      </label>
+      <label>Comment
+        <input type="text" x-model="silenceForm.comment" placeholder="Maintenance window">
+      </label>
+      <p x-show="silenceError" style="color:red" x-text="silenceError"></p>
       <footer>
-        Severity: <span x-text="alert.severity"></span> |
-        Fired: <span x-text="new Date(alert.fired_at).toLocaleString()"></span>
+        <button class="secondary outline" @click="showSilenceModal=false">Cancel</button>
+        <button @click="createSilence()">Create</button>
       </footer>
     </article>
-  </template>
-  <p x-show="alerts.length === 0">No active alerts.</p>
+  </dialog>
+
+  <!-- ── Live SSE Banner ───────────────────────────────────────────────── -->
+  <div id="sse-banner" x-show="liveAlert"
+    style="position:fixed;bottom:16px;right:16px;max-width:360px;z-index:999"
+    x-transition>
+    <article x-show="liveAlert" :class="'alert-banner-' + (liveAlert && liveAlert.severity)">
+      <header>
+        <strong x-text="liveAlert && liveAlert.rule_name"></strong>
+        <button aria-label="Close" rel="prev" @click="liveAlert=null"></button>
+      </header>
+      <p x-text="liveAlert && liveAlert.summary"></p>
+      <small x-text="liveAlert && ('Severity: ' + liveAlert.severity + ' · ' + fmtTime(liveAlert.fired_at))"></small>
+    </article>
+  </div>
+
 </div>
+
+<style>
+.badge-critical { background:#d32f2f; color:#fff; padding:2px 8px; border-radius:4px; font-size:12px }
+.badge-warning  { background:#f57c00; color:#fff; padding:2px 8px; border-radius:4px; font-size:12px }
+.badge-info     { background:#1976d2; color:#fff; padding:2px 8px; border-radius:4px; font-size:12px }
+.badge-active   { background:#388e3c; color:#fff; padding:2px 8px; border-radius:4px; font-size:12px }
+.badge-expired  { background:#9e9e9e; color:#fff; padding:2px 8px; border-radius:4px; font-size:12px }
+.state-firing   { color:#d32f2f; font-weight:bold }
+.state-resolved { color:#388e3c }
+.state-pending  { color:#f57c00 }
+.alert-banner-critical { border-left:4px solid #d32f2f }
+.alert-banner-warning  { border-left:4px solid #f57c00 }
+</style>
+
 <script>
-  function alertList() {
-    return {
-      alerts: [],
-      init() {
-        const es = new EventSource('/sse/alerts');
-        es.onmessage = (e) => {
-          const alert = JSON.parse(e.data);
-          const idx = this.alerts.findIndex(a => a.rule_name === alert.rule_name);
-          if (idx >= 0) {
-            this.alerts[idx] = alert;
-          } else {
-            this.alerts.unshift(alert);
-          }
-        };
+function alertManager() {
+  return {
+    active: [],
+    history: [],
+    silences: [],
+    liveAlert: null,
+    showSilenceModal: false,
+    silenceError: '',
+    silenceForm: { rule_name: '', duration: '2h', created_by: '', comment: '' },
+
+    async init() {
+      await Promise.all([this.loadActive(), this.loadHistory(), this.loadSilences()]);
+      // SSE for live alerts
+      const es = new EventSource('/sse/alerts');
+      es.onmessage = (e) => {
+        const alert = JSON.parse(e.data);
+        this.liveAlert = alert;
+        // Refresh active list on new event
+        this.loadActive();
+        this.loadHistory();
+        setTimeout(() => { if (this.liveAlert === alert) this.liveAlert = null; }, 8000);
+      };
+    },
+
+    async loadActive() {
+      const r = await fetch('/api/v1/alerts/active');
+      this.active = r.ok ? (await r.json() || []) : [];
+    },
+
+    async loadHistory() {
+      const r = await fetch('/api/v1/alerts');
+      this.history = r.ok ? (await r.json() || []) : [];
+    },
+
+    async loadSilences() {
+      const r = await fetch('/api/v1/silences');
+      this.silences = r.ok ? (await r.json() || []) : [];
+    },
+
+    openSilence(ruleName) {
+      this.silenceForm = { rule_name: ruleName || '', duration: '2h', created_by: '', comment: '' };
+      this.silenceError = '';
+      this.showSilenceModal = true;
+    },
+
+    async createSilence() {
+      this.silenceError = '';
+      const r = await fetch('/api/v1/silences', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(this.silenceForm),
+      });
+      if (!r.ok) {
+        this.silenceError = await r.text();
+        return;
       }
-    }
+      this.showSilenceModal = false;
+      await this.loadSilences();
+    },
+
+    async deleteSilence(id) {
+      await fetch('/api/v1/silences/' + id, { method: 'DELETE' });
+      await this.loadSilences();
+    },
+
+    isActiveSilence(s) {
+      const now = new Date();
+      return new Date(s.starts_at) <= now && now < new Date(s.ends_at);
+    },
+
+    fmtTime(t) {
+      if (!t) return '—';
+      return new Date(t).toLocaleString();
+    },
   }
+}
 </script>
 {{end}}

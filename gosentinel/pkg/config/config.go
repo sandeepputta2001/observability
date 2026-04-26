@@ -79,10 +79,31 @@ type PostgresConfig struct {
 // AlertingConfig holds alerting configuration.
 type AlertingConfig struct {
 	RulesFile    string `mapstructure:"rules_file"`
+	DedupTTL     string `mapstructure:"dedup_ttl"` // e.g. "10m" — suppress duplicate notifications
+
+	// Slack
 	SlackWebhook string `mapstructure:"slack_webhook"`
+
+	// PagerDuty
 	PagerDutyKey string `mapstructure:"pagerduty_key"`
-	SMTPHost     string `mapstructure:"smtp_host"`
-	SMTPFrom     string `mapstructure:"smtp_from"`
+
+	// Gmail / SMTP
+	GmailUsername string   `mapstructure:"gmail_username"` // sender Gmail address
+	GmailPassword string   `mapstructure:"gmail_password"` // Gmail App Password
+	GmailTo       []string `mapstructure:"gmail_to"`       // recipient addresses
+	SMTPHost      string   `mapstructure:"smtp_host"`      // override host (default: smtp.gmail.com)
+	SMTPPort      int      `mapstructure:"smtp_port"`      // override port (default: 587)
+
+	// Generic Webhook
+	WebhookURL    string `mapstructure:"webhook_url"`
+	WebhookSecret string `mapstructure:"webhook_secret"` // optional HMAC signing secret
+
+	// OpsGenie
+	OpsGenieKey    string `mapstructure:"opsgenie_key"`
+	OpsGenieRegion string `mapstructure:"opsgenie_region"` // "us" or "eu"
+
+	// Microsoft Teams
+	TeamsWebhook string `mapstructure:"teams_webhook"`
 }
 
 // Load reads configuration from file and environment variables.
@@ -110,6 +131,10 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("pyroscope.endpoint", "http://localhost:4040")
 	v.SetDefault("postgres.dsn", "postgres://gosentinel:gosentinel@localhost:5432/gosentinel?sslmode=disable")
 	v.SetDefault("alerting.rules_file", "config/alert-rules.yaml")
+	v.SetDefault("alerting.dedup_ttl", "10m")
+	v.SetDefault("alerting.smtp_host", "smtp.gmail.com")
+	v.SetDefault("alerting.smtp_port", 587)
+	v.SetDefault("alerting.opsgenie_region", "us")
 
 	v.SetEnvPrefix("GOSENTINEL")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))

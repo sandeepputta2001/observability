@@ -9,6 +9,9 @@ rules:
     notify:
       - slack
       - pagerduty
+      - gmail
+      - opsgenie
+      - teams
 
   - name: "High p99 latency"
     expr: 'histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 1.0'
@@ -18,6 +21,9 @@ rules:
       summary: "P99 latency above 1 second"
     notify:
       - slack
+      - gmail
+      - webhook
+      - teams
 
   - name: "Service down"
     expr: 'up == 0'
@@ -28,6 +34,10 @@ rules:
     notify:
       - slack
       - pagerduty
+      - gmail
+      - opsgenie
+      - webhook
+      - teams
 
   - name: "High memory usage"
     expr: 'process_resident_memory_bytes > 500000000'
@@ -37,3 +47,31 @@ rules:
       summary: "Process memory above 500MB"
     notify:
       - slack
+      - gmail
+      - teams
+
+  - name: "SLO burn rate fast"
+    expr: 'gosentinel_slo_burn_rate{window="1h"} > 14.4'
+    for: 2m
+    severity: critical
+    annotations:
+      summary: "SLO fast burn rate exceeded (1h window)"
+      description: "Burn rate {{ $value | humanize }}x — error budget will be exhausted in < 1 hour"
+    notify:
+      - slack
+      - pagerduty
+      - gmail
+      - opsgenie
+      - teams
+
+  - name: "SLO burn rate slow"
+    expr: 'gosentinel_slo_burn_rate{window="6h"} > 6.0'
+    for: 15m
+    severity: warning
+    annotations:
+      summary: "SLO slow burn rate exceeded (6h window)"
+    notify:
+      - slack
+      - gmail
+      - webhook
+      - teams

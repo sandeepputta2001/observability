@@ -239,6 +239,24 @@ services:
       GOSENTINEL_LOKI_ENDPOINT: http://loki:3100
       GOSENTINEL_JAEGER_ENDPOINT: jaeger:16685
       GOSENTINEL_POSTGRES_DSN: postgres://gosentinel:gosentinel@postgres:5432/gosentinel?sslmode=disable
+      # ── Alert channels (set via .env or override) ──────────────────────────
+      # Slack
+      GOSENTINEL_ALERTING_SLACK_WEBHOOK: ${GOSENTINEL_ALERTING_SLACK_WEBHOOK:-}
+      # PagerDuty
+      GOSENTINEL_ALERTING_PAGERDUTY_KEY: ${GOSENTINEL_ALERTING_PAGERDUTY_KEY:-}
+      # Gmail — use a Google App Password, NOT your account password
+      # Generate at: https://myaccount.google.com/apppasswords
+      GOSENTINEL_ALERTING_GMAIL_USERNAME: ${GOSENTINEL_ALERTING_GMAIL_USERNAME:-}
+      GOSENTINEL_ALERTING_GMAIL_PASSWORD: ${GOSENTINEL_ALERTING_GMAIL_PASSWORD:-}
+      GOSENTINEL_ALERTING_GMAIL_TO: ${GOSENTINEL_ALERTING_GMAIL_TO:-}
+      # Generic Webhook
+      GOSENTINEL_ALERTING_WEBHOOK_URL: ${GOSENTINEL_ALERTING_WEBHOOK_URL:-}
+      GOSENTINEL_ALERTING_WEBHOOK_SECRET: ${GOSENTINEL_ALERTING_WEBHOOK_SECRET:-}
+      # OpsGenie
+      GOSENTINEL_ALERTING_OPSGENIE_KEY: ${GOSENTINEL_ALERTING_OPSGENIE_KEY:-}
+      GOSENTINEL_ALERTING_OPSGENIE_REGION: ${GOSENTINEL_ALERTING_OPSGENIE_REGION:-us}
+      # Dedup window — suppress duplicate notifications within this period
+      GOSENTINEL_ALERTING_DEDUP_TTL: ${GOSENTINEL_ALERTING_DEDUP_TTL:-10m}
     ports:
       - "9091:9090"
     networks: [gosentinel]

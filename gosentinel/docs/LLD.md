@@ -14,7 +14,17 @@ github.com/yourorg/gosentinel
 │   ├── sampling/             — tail-based sampling policies
 │   ├── anomaly/              — EWMA anomaly detection
 │   ├── slo/                  — SLO burn rate tracking
-│   ├── alerting/             — rule evaluation + notifiers
+│   ├── alerting/             — rule evaluation + notifiers + escalation + grouping
+│   │   ├── evaluator.go      — RuleEvaluator (MetricsQL → state machine → AlertManager)
+│   │   ├── manager.go        — AlertManager (routing, dedup, retry, fan-out)
+│   │   ├── notifier.go       — Slack, Gmail, PagerDuty, OpsGenie, Teams, Webhook
+│   │   ├── escalation.go     — EscalationPolicy (time/severity-based channel escalation)
+│   │   ├── grouping.go       — AlertGrouper (batch correlated alerts, reduce noise)
+│   │   ├── metrics.go        — AlertManagerMetrics (Prometheus instrumentation)
+│   │   ├── routing.go        — RoutingConfig (per-rule channel map)
+│   │   ├── store.go          — AlertStore + SilenceManager
+│   │   ├── notification_log.go — NotificationLog (audit ring buffer)
+│   │   └── hmac.go           — HMAC-SHA256 webhook signing
 │   ├── storage/              — backend client wrappers
 │   ├── metrics/              — RED/USE/Golden Signal metrics
 │   ├── health/               — structured health checks
@@ -130,6 +140,7 @@ ObserveAll(ctx, points <-chan *MetricPoint, anomalies chan<- *AnomalyEvent):
     isAnomaly, zScore = detector.Observe(point.Value)
     if isAnomaly:
       emit AnomalyEvent{severity: "warning" if z<6σ else "critical"}
+      → AlertManager.Notify() as synthetic alert event
 ```
 
 ---
@@ -144,7 +155,16 @@ ObserveAll(ctx, points <-chan *MetricPoint, anomalies chan<- *AnomalyEvent):
                     │                                      ▼
 [no state] ──isFiring──► [pending] ──for elapsed──► [firing] ──!isFiring──► [resolved]
                                                         │
-                                                        └──► notify(Slack, PagerDuty)
+                                                        └──► AlertManager.Notify()
+                                                                  │
+                                                    EscalationPolicy.ChannelsFor(rule, firingDur)
+                                                                  │ (fallback)
+                                                         RoutingConfig.ChannelsFor(rule)
+                                                                  │
+                                                    ┌─────────────┼──────────────────┐
+                                                    ▼             ▼                  ▼
+                                                 Slack          Gmail           PagerDuty
+                                                 Teams        Webhook           OpsGenie
 ```
 
 ### PostgreSQL Schema
@@ -174,7 +194,167 @@ func (e *RuleEvaluator) Subscribe() (<-chan *AlertEvent, func()) {
 
 ---
 
-## 6. QueryServer — Concurrent Fan-Out
+## 6. AlertManager — Detailed Design
+
+### Notification Pipeline
+
+```
+AlertEvent
+    │
+    ├─► AlertStore.Record()           always — ring buffer (500 events)
+    │
+    ├─► Prometheus metrics update     alerts_total{rule, state, severity}++
+    │                                 active_alerts = len(Store.Active())
+    │
+    ├─► firingStart tracking          record when rule first entered firing state
+    │
+    ├─► SilenceManager.IsSilenced()   drop if rule is silenced
+    │       └─► silenced_total{rule}++
+    │
+    ├─► isDuplicate()                 drop if same (rule, state) within dedupTTL
+    │       └─► dedup_total{rule}++
+    │
+    ├─► resolveChannels()
+    │       ├── EscalationPolicy.ChannelsFor(rule, firingDuration)  [priority 1]
+    │       ├── RoutingConfig.ChannelsFor(rule)                     [priority 2]
+    │       └── all registered channels                             [fallback]
+    │
+    └─► fan-out (one goroutine per channel)
+            │
+            ├─► sendWithRetry()       exponential back-off
+            │       attempt 1 ──► Notifier.Notify()
+            │       wait 2s
+            │       attempt 2 ──► Notifier.Notify()  → retry_total{channel}++
+            │       wait 4s (capped at 30s)
+            │       attempt 3 ──► Notifier.Notify()  → retry_total{channel}++
+            │
+            ├─► NotificationLog.Record()   audit trail (1000 records)
+            └─► notifications_total{channel, status}++
+                notification_duration_seconds{channel}.Observe(elapsed)
+```
+
+### AlertManager struct
+
+```go
+type AlertManager struct {
+    channels    []channelEntry       // registered notifiers
+    dedupTTL    time.Duration
+    dedupDB     map[string]time.Time // (rule:state) → last sent
+    firingStart map[string]time.Time // rule → when it started firing
+
+    Store      *AlertStore
+    Silences   *SilenceManager
+    Routing    *RoutingConfig
+    NLog       *NotificationLog
+    Escalation *EscalationPolicy    // optional — time-based escalation
+    Metrics    *AlertManagerMetrics // optional — Prometheus instrumentation
+}
+```
+
+### RoutingConfig
+
+```go
+// Per-rule channel routing — thread-safe, updatable at runtime.
+type RoutingConfig struct {
+    mu     sync.RWMutex
+    routes map[string][]string  // rule name → channel names
+}
+
+// "*" wildcard applies to every alert.
+// Rule-specific entries are merged on top.
+func (rc *RoutingConfig) ChannelsFor(ruleName string) []string
+```
+
+### EscalationPolicy
+
+```go
+// EscalationLevel defines a single escalation tier.
+type EscalationLevel struct {
+    After          time.Duration // how long alert must be firing
+    Channels       []string      // notifiers to use at this level
+    RepeatInterval time.Duration // suppress re-notification within window
+}
+
+// Default policy (applied via "*" wildcard):
+//   Level 0 (immediate):  slack + gmail,     repeat every 10m
+//   Level 1 (after 5m):   + pagerduty,       repeat every 30m
+//   Level 2 (after 15m):  + opsgenie,        repeat every 60m
+```
+
+### AlertGrouper
+
+```go
+// AlertGrouper batches related alerts within a wait window.
+type AlertGrouper struct {
+    keyFn      GroupKeyFunc          // GroupBySeverity | GroupByService | GroupByRule
+    waitWindow time.Duration         // default 30s
+    flushFn    func(ctx, *AlertGroup)
+    groups     map[string]*pendingGroup
+}
+
+// GroupKeyFunc options:
+//   GroupBySeverity  — "severity=critical"
+//   GroupByService   — "service=order-service"
+//   GroupByRule      — "rule=High error rate" (no batching)
+```
+
+### NotificationLog
+
+```go
+// Ring buffer of delivery records — newest-first on List().
+type NotificationLog struct {
+    mu      sync.RWMutex
+    records []*NotificationRecord  // max 1000
+}
+
+type NotificationRecord struct {
+    Timestamp time.Time
+    Channel   string
+    RuleName  string
+    State     string
+    Severity  string
+    Status    NotificationStatus  // "sent" | "failed"
+    Error     string
+}
+```
+
+### Notifier Implementations
+
+| Notifier | Transport | Auth | Payload |
+|----------|-----------|------|---------|
+| SlackNotifier | HTTPS POST | Webhook URL | JSON attachment with color-coded severity + fields |
+| GmailNotifier | SMTP TLS (port 465) / STARTTLS (port 587) | App Password | HTML email with styled card + label table |
+| PagerDutyNotifier | HTTPS POST | Integration Key | Events API v2 trigger/resolve + custom_details |
+| OpsGenieNotifier | HTTPS POST | API Key header | Alerts API v2, P1–P3 priority, close on resolve |
+| TeamsNotifier | HTTPS POST | Webhook URL | Adaptive Card v1.4 |
+| WebhookNotifier | HTTPS POST | HMAC-SHA256 header | JSON AlertEvent + metadata |
+
+### Gmail SMTP Dual-Mode
+
+```
+GmailNotifier.Notify():
+  if SMTPPort == 465:
+    tls.Dial("tcp", "smtp.gmail.com:465", tlsCfg{MinVersion: TLS12})
+    smtp.NewClient(conn) → Auth → Mail → Rcpt → Data
+  else (port 587, default):
+    smtp.SendMail("smtp.gmail.com:587", PlainAuth, ...) // STARTTLS
+```
+
+### AlertManagerMetrics (Prometheus)
+
+```
+gosentinel_alertmanager_notifications_total{channel, status}   Counter
+gosentinel_alertmanager_notification_duration_seconds{channel} Histogram
+gosentinel_alertmanager_alerts_total{rule, state, severity}    Counter
+gosentinel_alertmanager_silenced_total{rule}                   Counter
+gosentinel_alertmanager_dedup_total{rule}                      Counter
+gosentinel_alertmanager_active_alerts                          Gauge
+gosentinel_alertmanager_retry_total{channel}                   Counter
+```
+
+---
+
+## 7. QueryServer — Concurrent Fan-Out
 
 ```go
 func (s *QueryServer) GetServiceHealth(ctx, req) (resp, error) {
@@ -197,7 +377,7 @@ func (s *QueryServer) GetServiceHealth(ctx, req) (resp, error) {
 
 ---
 
-## 7. HTTP Middleware Chain
+## 8. HTTP Middleware Chain
 
 ```
 Request
@@ -223,7 +403,7 @@ Handler
 
 ---
 
-## 8. SSE Alert Stream
+## 9. SSE Alert Stream
 
 ```go
 func sseAlertsHandler(w http.ResponseWriter, r *http.Request) {
@@ -249,7 +429,7 @@ func sseAlertsHandler(w http.ResponseWriter, r *http.Request) {
 
 ---
 
-## 9. SLO Burn Rate Calculation
+## 10. SLO Burn Rate Calculation
 
 ```
 availability(window) = sum(increase(good_requests[window])) / sum(increase(total_requests[window]))
@@ -264,7 +444,7 @@ Multi-window alert fires when BOTH windows exceed threshold:
 
 ---
 
-## 10. Config Loading
+## 11. Config Loading
 
 ```
 Priority (highest to lowest):
@@ -278,7 +458,7 @@ Example: victoria_metrics.endpoint → GOSENTINEL_VICTORIA_METRICS_ENDPOINT
 
 ---
 
-## 11. Kubernetes Resource Sizing
+## 12. Kubernetes Resource Sizing
 
 | Component | CPU Request | CPU Limit | Mem Request | Mem Limit | Replicas |
 |-----------|-------------|-----------|-------------|-----------|----------|
@@ -289,7 +469,7 @@ Example: victoria_metrics.endpoint → GOSENTINEL_VICTORIA_METRICS_ENDPOINT
 
 ---
 
-## 12. Graceful Shutdown Sequence
+## 13. Graceful Shutdown Sequence
 
 ```
 SIGTERM received
@@ -312,7 +492,7 @@ SIGTERM received
 
 ---
 
-## 13. Error Handling Conventions
+## 14. Error Handling Conventions
 
 ```go
 // Always wrap with context
@@ -334,7 +514,7 @@ slog.ErrorContext(ctx, "msg",
 
 ---
 
-## 14. Testing Strategy
+## 15. Testing Strategy
 
 | Layer | Approach | Coverage Target |
 |-------|----------|-----------------|
@@ -347,3 +527,52 @@ Test patterns used:
 - Mock interfaces (VMQuerier, Notifier) for unit isolation
 - Channel-based assertions with `time.After` timeouts
 - `sync.WaitGroup` for goroutine synchronization in tests
+
+---
+
+## 16. Alert Manager REST API Reference
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/alerts` | All recent alert events (ring buffer, 500) |
+| GET | `/api/v1/alerts/active` | Currently firing alerts |
+| POST | `/api/v1/alerts/test` | Send a test notification |
+| GET | `/api/v1/channels` | List registered notification channels |
+| GET | `/api/v1/silences` | List silences |
+| POST | `/api/v1/silences` | Create a silence |
+| DELETE | `/api/v1/silences/{id}` | Delete a silence |
+| GET | `/api/v1/notifications` | Notification delivery audit log |
+| GET | `/api/v1/notifications/{channel}` | Log filtered by channel |
+| GET | `/api/v1/routing` | Current per-rule routing config |
+| POST | `/api/v1/routing` | Update routing for a rule at runtime |
+
+### Test notification request body
+
+```json
+{
+  "channel": "gmail",
+  "rule_name": "test-alert",
+  "severity": "warning",
+  "summary": "GoSentinel test notification"
+}
+```
+
+### Create silence request body
+
+```json
+{
+  "rule_name": "High memory usage",
+  "created_by": "ops-team",
+  "comment": "Planned maintenance window",
+  "duration": "2h"
+}
+```
+
+### Update routing request body
+
+```json
+{
+  "rule_name": "Service down",
+  "channels": ["pagerduty", "gmail", "slack"]
+}
+```

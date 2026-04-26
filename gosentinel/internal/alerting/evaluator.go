@@ -103,6 +103,13 @@ func NewRuleEvaluator(rulesFile string, vm VMQueryClient, db *pgxpool.Pool,
 	}, nil
 }
 
+// Rules returns the loaded alert rules (read-only copy).
+func (e *RuleEvaluator) Rules() []AlertRule {
+	out := make([]AlertRule, len(e.rules))
+	copy(out, e.rules)
+	return out
+}
+
 // Subscribe returns a channel that receives alert events. The caller must drain it.
 func (e *RuleEvaluator) Subscribe() (<-chan *AlertEvent, func()) {
 	ch := make(chan *AlertEvent, 64)

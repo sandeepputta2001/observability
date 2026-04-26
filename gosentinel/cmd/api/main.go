@@ -264,6 +264,45 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Build AlertManager so the API can expose alert history, silences, and
+	// notification audit log. Metrics are registered with the default registry
+	// and exposed on /metrics.
+	dedupTTL, _ := time.ParseDuration(cfg.Alerting.DedupTTL)
+	if dedupTTL == 0 {
+		dedupTTL = 10 * time.Minute
+	}
+	apiAlertMgr := alerting.NewAlertManager(dedupTTL).
+		WithMetrics(alerting.NewAlertManagerMetrics())
+
+	// Register notification channels for the test-notification endpoint.
+	if cfg.Alerting.SlackWebhook != "" {
+		apiAlertMgr.Register("slack", alerting.NewSlackNotifier(cfg.Alerting.SlackWebhook), nil)
+	}
+	if cfg.Alerting.PagerDutyKey != "" {
+		apiAlertMgr.Register("pagerduty", alerting.NewPagerDutyNotifier(cfg.Alerting.PagerDutyKey), nil)
+	}
+	if cfg.Alerting.GmailUsername != "" && cfg.Alerting.GmailPassword != "" && len(cfg.Alerting.GmailTo) > 0 {
+		apiAlertMgr.Register("gmail", alerting.NewGmailNotifier(alerting.GmailConfig{
+			SMTPHost: cfg.Alerting.SMTPHost,
+			SMTPPort: cfg.Alerting.SMTPPort,
+			Username: cfg.Alerting.GmailUsername,
+			Password: cfg.Alerting.GmailPassword,
+			From:     cfg.Alerting.GmailUsername,
+			To:       cfg.Alerting.GmailTo,
+		}), nil)
+	}
+	if cfg.Alerting.WebhookURL != "" {
+		apiAlertMgr.Register("webhook",
+			alerting.NewWebhookNotifier(cfg.Alerting.WebhookURL, cfg.Alerting.WebhookSecret), nil)
+	}
+	if cfg.Alerting.OpsGenieKey != "" {
+		apiAlertMgr.Register("opsgenie",
+			alerting.NewOpsGenieNotifier(cfg.Alerting.OpsGenieKey, cfg.Alerting.OpsGenieRegion), nil)
+	}
+	if cfg.Alerting.TeamsWebhook != "" {
+		apiAlertMgr.Register("teams", alerting.NewTeamsNotifier(cfg.Alerting.TeamsWebhook), nil)
+	}
+
 	queryServer := &QueryServer{
 		jaeger: jaegerClient, vm: vmClient,
 		pyroscope: pyroscopeClient, anomalies: detectorRegistry,
@@ -286,6 +325,9 @@ func main() {
 		_, _ = w.Write([]byte(`{"status":"ok","service":"gosentinel-api"}`))
 	})
 	r.Handle("/metrics", promhttp.Handler())
+
+	// Alert management REST API
+	NewAlertsHandler(apiAlertMgr).Mount(r)
 
 	srv := &http.Server{
 		Addr: cfg.API.ListenAddr, Handler: r,

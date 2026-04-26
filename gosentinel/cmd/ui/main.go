@@ -10,6 +10,8 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -33,6 +35,7 @@ type UIServer struct {
 	pyroscope *storage.PyroscopeClient
 	tmpl      *template.Template
 	alertCh   <-chan alertMsg
+	apiAddr   string // base URL of the GoSentinel API server, e.g. "http://localhost:8080"
 }
 
 // alertMsg is a JSON-serialisable alert for SSE.
@@ -107,6 +110,7 @@ func main() {
 		pyroscope: storage.NewPyroscopeClient(cfg.Pyroscope.Endpoint),
 		tmpl:      tmpl,
 		alertCh:   alertBroadcast,
+		apiAddr:   cfg.UI.APIAddr,
 	}
 
 	r := chi.NewRouter()
@@ -124,6 +128,10 @@ func main() {
 	r.Get("/partials/service/{name}/metrics", ui.serviceMetricsPartial)
 	r.Get("/partials/service/{name}/logs", ui.serviceLogsPartial)
 	r.Get("/partials/service/{name}/profile", ui.serviceProfilePartial)
+
+	// Proxy alert management API calls to the API server so the browser
+	// only needs to talk to the UI origin (avoids CORS issues).
+	r.Mount("/api/v1", ui.apiProxy(cfg.UI.APIAddr))
 
 	r.Handle("/static/*", http.FileServer(http.FS(assets)))
 
@@ -315,4 +323,19 @@ func (ui *UIServer) serviceProfilePartial(w http.ResponseWriter, r *http.Request
 	if err := ui.tmpl.ExecuteTemplate(w, "profile-partial.html", fns); err != nil {
 		slog.ErrorContext(ctx, "rendering profile partial", "error", err)
 	}
+}
+
+// apiProxy returns an http.Handler that reverse-proxies /api/v1/* requests to
+// the GoSentinel API server. This lets the browser call /api/v1/alerts without
+// hitting CORS restrictions.
+func (ui *UIServer) apiProxy(apiAddr string) http.Handler {
+	target, err := url.Parse(apiAddr)
+	if err != nil {
+		slog.Error("parsing API addr for proxy", "addr", apiAddr, "error", err)
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "proxy misconfigured", http.StatusInternalServerError)
+		})
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	return proxy
 }

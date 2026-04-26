@@ -65,7 +65,7 @@ GoSentinel is a self-hosted, full-stack observability platform for Go microservi
 - Scrapes Prometheus `/metrics` endpoints from all services
 
 ### 4.2 GoSentinel Pipeline
-The core streaming engine. Runs five concurrent subsystems:
+The core streaming engine. Runs six concurrent subsystems:
 
 ```
 OTLP Receiver ──► TailSampler ──► Jaeger exporter
@@ -75,16 +75,79 @@ OTLP Receiver ──► TailSampler ──► Jaeger exporter
               (trace+metric+log join on trace_id, 30s window)
                        │
                        ▼
-              DetectorRegistry ──► AnomalyEvent channel
-              (EWMA 3σ per metric series)
-                       │
-                       ▼
-              RuleEvaluator ──► Notifiers (Slack, PagerDuty)
-              (MetricsQL rules, PostgreSQL state)
+              DetectorRegistry ──► AnomalyEvent channel ──► AlertManager
+              (EWMA 3σ per metric series)                        │
+                       │                                         │
+                       ▼                                         │
+              RuleEvaluator ──────────────────────────────────► AlertManager
+              (MetricsQL rules, PostgreSQL state)                │
+                       │                                         ▼
+                       │                          EscalationPolicy (severity/time)
+                       │                                         │
+                       │                          RoutingConfig (per-rule channels)
+                       │                                         │
+                       │              ┌──────────────────────────┼──────────────────┐
+                       │              ▼              ▼           ▼                  ▼
+                       │           Slack           Gmail    PagerDuty          OpsGenie
+                       │           Teams         Webhook
                        │
                        ▼
               SLOTracker ──► BurnRateViolation alerts
               (multi-window: 1h/6h/3d)
+```
+
+### 4.2.1 AlertManager — End-to-End Notification Flow
+
+```
+AlertEvent (from RuleEvaluator or EWMA anomaly)
+    │
+    ├─► AlertStore.Record()           always — history ring buffer (500 events)
+    │
+    ├─► Prometheus metrics update     gosentinel_alertmanager_alerts_total
+    │
+    ├─► SilenceManager.IsSilenced()   drop if rule is silenced
+    │       └─► gosentinel_alertmanager_silenced_total++
+    │
+    ├─► Deduplication check           drop if same (rule, state) within dedupTTL
+    │       └─► gosentinel_alertmanager_dedup_total++
+    │
+    ├─► EscalationPolicy.ChannelsFor()  time-based channel escalation
+    │       ├── Level 0 (immediate):  slack + gmail
+    │       ├── Level 1 (after 5m):   + pagerduty
+    │       └── Level 2 (after 15m):  + opsgenie
+    │
+    ├─► RoutingConfig.ChannelsFor()   per-rule static override (if no escalation match)
+    │
+    └─► Fan-out (goroutine per channel)
+            │
+            ├─► sendWithRetry()       exponential back-off (2s → 4s → 30s cap, 3 attempts)
+            │       ├─► SlackNotifier.Notify()       rich attachment with fields
+            │       ├─► GmailNotifier.Notify()       HTML email, TLS/STARTTLS dual-mode
+            │       ├─► PagerDutyNotifier.Notify()   Events API v2 trigger/resolve
+            │       ├─► OpsGenieNotifier.Notify()    Alerts API v2, P1–P3 priority
+            │       ├─► TeamsNotifier.Notify()       Adaptive Card v1.4
+            │       └─► WebhookNotifier.Notify()     HMAC-SHA256 signed JSON POST
+            │
+            ├─► NotificationLog.Record()             audit trail (1000 records)
+            └─► gosentinel_alertmanager_notifications_total{channel, status}
+                gosentinel_alertmanager_notification_duration_seconds{channel}
+```
+
+### 4.2.2 Alert Grouping
+
+`AlertGrouper` batches related alerts within a configurable wait window (default 30s)
+before dispatching, reducing notification noise during correlated failure cascades.
+
+```
+AlertEvent ──► AlertGrouper.Add()
+                    │
+                    ├── GroupBySeverity  — batch by severity level
+                    ├── GroupByService   — batch by originating service
+                    └── GroupByRule      — one notification per rule (default)
+                    │
+                    └── timer.AfterFunc(waitWindow) ──► flushFn(group)
+                                                              │
+                                                              └─► Notifier.Notify(representative event)
 ```
 
 ### 4.3 GoSentinel API
@@ -92,6 +155,17 @@ OTLP Receiver ──► TailSampler ──► Jaeger exporter
 - `GetServiceHealth`: concurrent fan-out to VM + Jaeger + Pyroscope via `errgroup`
 - `StreamAlerts`: server-streaming RPC, broadcast pattern with `sync.Map` subscribers
 - Middleware: JWT auth → rate limiter (token bucket) → OTel tracing → request logging
+- Alert management REST API:
+  - `GET /api/v1/alerts` — full alert history (ring buffer, 500 events)
+  - `GET /api/v1/alerts/active` — currently firing alerts
+  - `POST /api/v1/alerts/test` — send a test notification to one or all channels
+  - `GET/POST /api/v1/silences` — manage alert silences
+  - `DELETE /api/v1/silences/{id}` — remove a silence
+  - `GET /api/v1/notifications` — notification delivery audit log
+  - `GET /api/v1/notifications/{channel}` — log filtered by channel name
+  - `GET /api/v1/routing` — current per-rule channel routing
+  - `POST /api/v1/routing` — update routing for a rule at runtime
+  - `GET /api/v1/channels` — list registered notification channels
 
 ### 4.4 GoSentinel UI
 - Go HTTP server with chi router
@@ -140,6 +214,20 @@ OTLP Receiver ──► TailSampler ──► Jaeger exporter
 - 3σ threshold: flag values > 3 standard deviations from EWMA mean
 - Warm-up period: first 10 observations excluded
 - Severity: warning (3σ), critical (6σ)
+- Anomalies forwarded to AlertManager as synthetic alert events
+
+### 5.8 Alert Manager Observability
+The AlertManager itself is instrumented with Prometheus metrics:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `gosentinel_alertmanager_notifications_total` | Counter | channel, status | Delivery attempts |
+| `gosentinel_alertmanager_notification_duration_seconds` | Histogram | channel | Delivery latency |
+| `gosentinel_alertmanager_alerts_total` | Counter | rule, state, severity | Events processed |
+| `gosentinel_alertmanager_silenced_total` | Counter | rule | Suppressed by silence |
+| `gosentinel_alertmanager_dedup_total` | Counter | rule | Suppressed by dedup |
+| `gosentinel_alertmanager_active_alerts` | Gauge | — | Currently firing |
+| `gosentinel_alertmanager_retry_total` | Counter | channel | Retry attempts |
 
 ---
 
@@ -155,12 +243,18 @@ Pipeline ──reads──► VictoriaMetrics (streaming metric points)
          ──reads──► Loki (WebSocket tail)
          ──reads──► Jaeger (span stream)
          ──joins──► CorrelationEngine (trace_id window join)
-         ──detects──► DetectorRegistry (EWMA anomaly)
-         ──evaluates──► RuleEvaluator (MetricsQL rules)
+         ──detects──► DetectorRegistry (EWMA anomaly) ──► AlertManager
+         ──evaluates──► RuleEvaluator (MetricsQL rules) ──► AlertManager
          ──tracks──► SLOTracker (burn rate)
+
+AlertManager ──► EscalationPolicy ──► RoutingConfig ──► Notifiers
+             ──► AlertStore (history)
+             ──► NotificationLog (audit)
+             ──► Prometheus metrics
 
 API ──fan-out──► VictoriaMetrics + Jaeger + Pyroscope + Loki
     ──streams──► Alert subscribers (broadcast channel)
+    ──REST──► AlertManager (silences, routing, history, test)
 
 UI ──HTMX──► API (partials)
    ──SSE──► Pipeline (alert stream)
@@ -202,6 +296,8 @@ AWS Account
 | Container | Non-root UID 65534, readOnlyRootFilesystem, drop ALL capabilities, seccomp RuntimeDefault |
 | Data | RDS encryption at rest (KMS), TLS in transit, EKS envelope encryption |
 | Audit | VPC Flow Logs, EKS audit logs, CloudTrail |
+| Webhooks | HMAC-SHA256 signature on outbound webhook payloads (X-GoSentinel-Signature) |
+| Gmail | App Password (not account password), TLS 1.2+ enforced |
 
 ---
 
@@ -230,3 +326,9 @@ AWS Account
 | Frontend | HTMX + Alpine.js | No build step, Go templates, SSE-native |
 | Anomaly detection | EWMA | No ML dependency, O(1) memory, configurable sensitivity |
 | Sampling | Tail-based | See all spans before deciding, keeps errors/slow traces |
+| Alert notifications | AlertManager fan-out | Slack, Gmail (SMTP), PagerDuty, OpsGenie, Teams, Webhook — all concurrent with retry |
+| Alert escalation | EscalationPolicy | Time-based channel escalation (immediate → 5m → 15m) |
+| Alert grouping | AlertGrouper | Batch correlated alerts within 30s window to reduce noise |
+| Alert routing | RoutingConfig | Per-rule channel selection loaded from YAML, updatable at runtime via REST |
+| Notification audit | NotificationLog | In-memory ring buffer (1000 records) of every delivery attempt |
+| Alert metrics | AlertManagerMetrics | Prometheus counters/histograms for notification pipeline observability |

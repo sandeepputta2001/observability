@@ -39,9 +39,15 @@ through a unified query API and live dashboard.
 - **Distributed tracing** — W3C TraceContext, tail-based sampling
 - **Trace-log correlation** — `trace_id` in every log line
 - **Continuous profiling** — CPU, goroutine, alloc via Pyroscope
-- **EWMA anomaly detection** — 3σ alerting, no ML dependency
+- **EWMA anomaly detection** — 3σ alerting, no ML dependency; anomalies forwarded to AlertManager
 - **SLO burn rate** — Google SRE Book multi-window (1h/6h/3d)
-- **Alert routing** — Slack + PagerDuty with pending→firing→resolved state
+- **Alert routing** — per-rule channel selection (Slack, Gmail, PagerDuty, OpsGenie, Teams, Webhook)
+- **Escalation policy** — time-based channel escalation (immediate → 5 min → 15 min)
+- **Alert grouping** — batch correlated alerts within 30 s window to reduce noise
+- **Notification audit log** — every delivery attempt recorded with status and error
+- **Alert manager metrics** — Prometheus counters/histograms for notification pipeline
+- **Test notifications** — fire a test alert to any channel via REST API
+- **Alert silences** — mute noisy rules with time-bounded silences
 - **Live dashboard** — HTMX auto-refresh, SSE real-time alerts
 - **Production K8s** — HPA, PDB, TopologySpread, NetworkPolicy, IRSA
 - **Terraform EKS** — VPC, EKS, RDS, ECR, IAM modules
@@ -269,14 +275,82 @@ over the config file. Prefix all env vars with `GOSENTINEL_`.
 | `pyroscope.endpoint` | `GOSENTINEL_PYROSCOPE_ENDPOINT` | `http://localhost:4040` | Pyroscope base URL |
 | `postgres.dsn` | `GOSENTINEL_POSTGRES_DSN` | — | PostgreSQL connection string |
 | `alerting.rules_file` | `GOSENTINEL_ALERTING_RULES_FILE` | `config/alert-rules.yaml` | Alert rules YAML path |
+| `alerting.dedup_ttl` | `GOSENTINEL_ALERTING_DEDUP_TTL` | `10m` | Suppress duplicate notifications within this window |
 | `alerting.slack_webhook` | `GOSENTINEL_ALERTING_SLACK_WEBHOOK` | — | Slack incoming webhook URL |
 | `alerting.pagerduty_key` | `GOSENTINEL_ALERTING_PAGERDUTY_KEY` | — | PagerDuty integration key |
+| `alerting.gmail_username` | `GOSENTINEL_ALERTING_GMAIL_USERNAME` | — | Gmail sender address |
+| `alerting.gmail_password` | `GOSENTINEL_ALERTING_GMAIL_PASSWORD` | — | Gmail App Password (not account password) |
+| `alerting.gmail_to` | `GOSENTINEL_ALERTING_GMAIL_TO` | — | Comma-separated recipient addresses |
+| `alerting.smtp_host` | `GOSENTINEL_ALERTING_SMTP_HOST` | `smtp.gmail.com` | SMTP server host |
+| `alerting.smtp_port` | `GOSENTINEL_ALERTING_SMTP_PORT` | `587` | SMTP port: 587 (STARTTLS) or 465 (implicit TLS) |
+| `alerting.webhook_url` | `GOSENTINEL_ALERTING_WEBHOOK_URL` | — | Generic webhook endpoint URL |
+| `alerting.webhook_secret` | `GOSENTINEL_ALERTING_WEBHOOK_SECRET` | — | HMAC-SHA256 signing secret for webhook |
+| `alerting.opsgenie_key` | `GOSENTINEL_ALERTING_OPSGENIE_KEY` | — | OpsGenie API key |
+| `alerting.opsgenie_region` | `GOSENTINEL_ALERTING_OPSGENIE_REGION` | `us` | OpsGenie region (`us` or `eu`) |
+| `alerting.teams_webhook` | `GOSENTINEL_ALERTING_TEAMS_WEBHOOK` | — | Microsoft Teams incoming webhook URL |
 
 ---
 
-## Alert Rules
+## Alert Manager
 
-Edit `config/alert-rules.yaml`:
+GoSentinel ships a full end-to-end alert manager with six notification channels,
+escalation policies, alert grouping, and Prometheus instrumentation.
+
+### Supported channels
+
+| Channel | Transport | What you need |
+|---------|-----------|---------------|
+| `slack` | HTTPS webhook | Incoming Webhook URL |
+| `gmail` | SMTP TLS/STARTTLS | Gmail address + App Password |
+| `pagerduty` | HTTPS Events API v2 | Integration Key |
+| `opsgenie` | HTTPS Alerts API v2 | API Key |
+| `teams` | HTTPS Adaptive Card | Incoming Webhook URL |
+| `webhook` | HTTPS POST (JSON) | Any HTTP endpoint; optional HMAC secret |
+
+### How it works
+
+1. `RuleEvaluator` evaluates MetricsQL rules every 30 s (configurable).
+2. EWMA anomaly detector forwards anomalies as synthetic alert events.
+3. On a state transition (pending → firing → resolved) `AlertManager.Notify()` is called.
+4. `AlertManager` checks silences → deduplication → escalation policy → routing config → fans out to matched channels concurrently.
+5. Each channel is retried up to 3 times with exponential back-off (2 s → 4 s → 30 s cap).
+6. Every delivery attempt (success or failure) is recorded in the `NotificationLog`.
+7. Prometheus metrics track delivery counts, latency, retries, silences, and dedup hits.
+
+### Escalation Policy
+
+Alerts automatically escalate to additional channels the longer they remain firing:
+
+| Level | Fires after | Channels | Repeat interval |
+|-------|-------------|----------|-----------------|
+| 0 | immediately | slack, gmail | 10 min |
+| 1 | 5 min | + pagerduty | 30 min |
+| 2 | 15 min | + opsgenie | 60 min |
+
+Override per-rule via `POST /api/v1/routing` or configure `EscalationPolicy` in code.
+
+### Alert Grouping
+
+`AlertGrouper` batches related alerts within a 30 s window before dispatching,
+reducing notification noise during correlated failure cascades. Group keys:
+
+- `GroupBySeverity` — batch all critical alerts together
+- `GroupByService` — batch all alerts from the same service
+- `GroupByRule` — one notification per rule (default, no batching)
+
+### Gmail Setup
+
+1. Enable 2-Step Verification on your Google account.
+2. Generate an App Password at https://myaccount.google.com/apppasswords
+3. Set `GOSENTINEL_ALERTING_GMAIL_USERNAME` and `GOSENTINEL_ALERTING_GMAIL_PASSWORD`.
+4. Set `GOSENTINEL_ALERTING_GMAIL_TO` to a comma-separated list of recipients.
+
+GoSentinel supports both STARTTLS (port 587, default) and implicit TLS (port 465).
+Set `GOSENTINEL_ALERTING_SMTP_PORT=465` to use implicit TLS.
+
+### Alert Rules
+
+Edit `config/alert-rules.yaml`. The `notify` list controls which channels receive each rule:
 
 ```yaml
 rules:
@@ -285,11 +359,99 @@ rules:
     for: 2m
     severity: critical
     annotations:
-      summary: "Error rate above 5%"
-    notify: [slack, pagerduty]
+      summary: "Service error rate above 5%"
+    notify: [slack, pagerduty, gmail, opsgenie, teams]
+
+  - name: "High p99 latency"
+    expr: 'histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 1.0'
+    for: 5m
+    severity: warning
+    annotations:
+      summary: "P99 latency above 1 second"
+    notify: [slack, gmail, webhook, teams]
 ```
 
-Supported notifiers: `slack`, `pagerduty`
+Supported notifiers: `slack`, `gmail`, `pagerduty`, `opsgenie`, `teams`, `webhook`
+
+### Alert Manager REST API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/alerts` | All recent alert events (ring buffer, 500) |
+| GET | `/api/v1/alerts/active` | Currently firing alerts |
+| POST | `/api/v1/alerts/test` | Send a test notification |
+| GET | `/api/v1/channels` | List registered notification channels |
+| GET | `/api/v1/silences` | List silences |
+| POST | `/api/v1/silences` | Create a silence |
+| DELETE | `/api/v1/silences/{id}` | Delete a silence |
+| GET | `/api/v1/notifications` | Notification delivery audit log |
+| GET | `/api/v1/notifications/{channel}` | Log filtered by channel |
+| GET | `/api/v1/routing` | Current per-rule routing config |
+| POST | `/api/v1/routing` | Update routing for a rule at runtime |
+
+#### Test a notification channel
+
+```bash
+# Test Slack
+curl -X POST http://localhost:8080/api/v1/alerts/test \
+  -H "Content-Type: application/json" \
+  -d '{"channel":"slack","severity":"warning","summary":"Test from GoSentinel"}'
+
+# Test Gmail
+curl -X POST http://localhost:8080/api/v1/alerts/test \
+  -H "Content-Type: application/json" \
+  -d '{"channel":"gmail","summary":"Test email from GoSentinel"}'
+
+# Test all channels at once
+curl -X POST http://localhost:8080/api/v1/alerts/test \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+#### List registered channels
+
+```bash
+curl http://localhost:8080/api/v1/channels
+# [{"name":"slack"},{"name":"gmail"},{"name":"pagerduty"}]
+```
+
+#### Silence a noisy rule
+
+```bash
+curl -X POST http://localhost:8080/api/v1/silences \
+  -H "Content-Type: application/json" \
+  -d '{"rule_name":"High memory usage","created_by":"ops","comment":"Planned maintenance","duration":"2h"}'
+```
+
+#### Update routing at runtime
+
+```bash
+# Route "Service down" only to PagerDuty and Gmail
+curl -X POST http://localhost:8080/api/v1/routing \
+  -H "Content-Type: application/json" \
+  -d '{"rule_name":"Service down","channels":["pagerduty","gmail"]}'
+```
+
+#### View notification audit log
+
+```bash
+curl http://localhost:8080/api/v1/notifications
+curl http://localhost:8080/api/v1/notifications/gmail
+```
+
+### Alert Manager Metrics
+
+The alert manager exposes Prometheus metrics at `/metrics` (pipeline `:9090`):
+
+| Metric | Description |
+|--------|-------------|
+| `gosentinel_alertmanager_notifications_total{channel,status}` | Delivery attempts |
+| `gosentinel_alertmanager_notification_duration_seconds{channel}` | Delivery latency |
+| `gosentinel_alertmanager_alerts_total{rule,state,severity}` | Events processed |
+| `gosentinel_alertmanager_silenced_total{rule}` | Suppressed by silence |
+| `gosentinel_alertmanager_dedup_total{rule}` | Suppressed by dedup |
+| `gosentinel_alertmanager_active_alerts` | Currently firing |
+| `gosentinel_alertmanager_retry_total{channel}` | Retry attempts |
 
 ---
 
