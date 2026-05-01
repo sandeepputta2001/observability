@@ -1,0 +1,218 @@
+################################################################################
+# OpenTelemetry Collector — LGTM-aware config
+# Receives OTLP from all services, fans out to:
+#   Traces  → Tempo (OTLP) + Jaeger (OTLP)
+#   Metrics → Mimir (remote_write) + VictoriaMetrics (remote_write)
+#   Logs    → Loki (push)
+################################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: gosentinel
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+      # Scrape Prometheus metrics from GoSentinel services
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: gosentinel-pipeline
+              scrape_interval: 15s
+              static_configs:
+                - targets: [gosentinel-pipeline.gosentinel.svc.cluster.local:9090]
+            - job_name: gosentinel-api
+              scrape_interval: 15s
+              static_configs:
+                - targets: [gosentinel-api.gosentinel.svc.cluster.local:8080]
+            - job_name: otel-collector
+              scrape_interval: 15s
+              static_configs:
+                - targets: [localhost:8888]
+
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 512
+
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 400
+
+      # Add cluster/environment resource attributes
+      resource:
+        attributes:
+          - key: deployment.environment
+            value: minikube
+            action: insert
+          - key: k8s.cluster.name
+            value: gosentinel-minikube
+            action: insert
+
+      # Tail sampling — keep errors, slow traces, 10% probabilistic
+      tail_sampling:
+        decision_wait: 10s
+        num_traces: 1000
+        expected_new_traces_per_sec: 10
+        policies:
+          - name: always-sample-errors
+            type: status_code
+            status_code: {status_codes: [ERROR]}
+          - name: high-latency
+            type: latency
+            latency: {threshold_ms: 500}
+          - name: probabilistic-10pct
+            type: probabilistic
+            probabilistic: {sampling_percentage: 10}
+
+    exporters:
+      # Traces → Tempo (primary LGTM trace backend)
+      otlp/tempo:
+        endpoint: tempo.gosentinel.svc.cluster.local:4317
+        tls:
+          insecure: true
+
+      # Traces → Jaeger (for GoSentinel API compatibility)
+      otlp/jaeger:
+        endpoint: jaeger.gosentinel.svc.cluster.local:4317
+        tls:
+          insecure: true
+
+      # Metrics → Mimir (primary LGTM metrics backend)
+      prometheusremotewrite/mimir:
+        endpoint: http://mimir.gosentinel.svc.cluster.local:9009/api/v1/push
+        tls:
+          insecure: true
+        headers:
+          X-Scope-OrgID: anonymous
+
+      # Metrics → VictoriaMetrics (for GoSentinel pipeline queries)
+      prometheusremotewrite/victoriametrics:
+        endpoint: http://victoriametrics.gosentinel.svc.cluster.local:8428/api/v1/write
+        tls:
+          insecure: true
+
+      # Logs → Loki
+      loki:
+        endpoint: http://loki.gosentinel.svc.cluster.local:3100/loki/api/v1/push
+        tls:
+          insecure: true
+        default_labels_enabled:
+          exporter: false
+          job: true
+          instance: true
+          level: true
+
+      # Debug (optional — set verbosity: detailed for troubleshooting)
+      debug:
+        verbosity: basic
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resource, batch, tail_sampling]
+          exporters: [otlp/tempo, otlp/jaeger]
+
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [memory_limiter, resource, batch]
+          exporters: [prometheusremotewrite/mimir, prometheusremotewrite/victoriametrics]
+
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, resource, batch]
+          exporters: [loki]
+
+      telemetry:
+        logs:
+          level: info
+        metrics:
+          address: 0.0.0.0:8888
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: gosentinel
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8888"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.102.0
+          args: ["--config=/etc/otel/config.yaml"]
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+            - name: metrics
+              containerPort: 8888
+            - name: health
+              containerPort: 13133
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 15
+            periodSeconds: 15
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: gosentinel
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+    - name: metrics
+      port: 8888
+      targetPort: 8888

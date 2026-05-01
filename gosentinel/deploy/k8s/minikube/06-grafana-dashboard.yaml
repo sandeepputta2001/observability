@@ -1,0 +1,154 @@
+################################################################################
+# Grafana Dashboard ConfigMap — GoSentinel Overview
+# Covers: RED metrics, alert manager stats, LGTM signal overview
+################################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-gosentinel
+  namespace: gosentinel
+  labels:
+    grafana_dashboard: "1"
+data:
+  gosentinel-overview.json: |
+    {
+      "title": "GoSentinel Overview",
+      "uid": "gosentinel-overview",
+      "tags": ["gosentinel", "lgtm"],
+      "timezone": "browser",
+      "schemaVersion": 38,
+      "refresh": "30s",
+      "time": {"from": "now-1h", "to": "now"},
+      "panels": [
+        {
+          "id": 1,
+          "title": "Active Alerts",
+          "type": "stat",
+          "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "mimir"},
+            "expr": "gosentinel_alertmanager_active_alerts",
+            "legendFormat": "Active"
+          }],
+          "options": {"colorMode": "background", "reduceOptions": {"calcs": ["lastNotNull"]}},
+          "fieldConfig": {"defaults": {"thresholds": {"steps": [
+            {"color": "green", "value": 0},
+            {"color": "yellow", "value": 1},
+            {"color": "red", "value": 5}
+          ]}}}
+        },
+        {
+          "id": 2,
+          "title": "Notifications Sent (5m)",
+          "type": "stat",
+          "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0},
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "mimir"},
+            "expr": "sum(increase(gosentinel_alertmanager_notifications_total{status=\"sent\"}[5m]))",
+            "legendFormat": "Sent"
+          }],
+          "options": {"colorMode": "background", "reduceOptions": {"calcs": ["lastNotNull"]}},
+          "fieldConfig": {"defaults": {"thresholds": {"steps": [{"color": "green", "value": 0}]}}}
+        },
+        {
+          "id": 3,
+          "title": "Notification Failures (5m)",
+          "type": "stat",
+          "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0},
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "mimir"},
+            "expr": "sum(increase(gosentinel_alertmanager_notifications_total{status=\"failed\"}[5m]))",
+            "legendFormat": "Failed"
+          }],
+          "options": {"colorMode": "background", "reduceOptions": {"calcs": ["lastNotNull"]}},
+          "fieldConfig": {"defaults": {"thresholds": {"steps": [
+            {"color": "green", "value": 0},
+            {"color": "red", "value": 1}
+          ]}}}
+        },
+        {
+          "id": 4,
+          "title": "Dedup Suppressed (5m)",
+          "type": "stat",
+          "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0},
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "mimir"},
+            "expr": "sum(increase(gosentinel_alertmanager_dedup_total[5m]))",
+            "legendFormat": "Deduped"
+          }],
+          "options": {"colorMode": "value", "reduceOptions": {"calcs": ["lastNotNull"]}},
+          "fieldConfig": {"defaults": {"thresholds": {"steps": [{"color": "blue", "value": 0}]}}}
+        },
+        {
+          "id": 5,
+          "title": "Notification Rate by Channel",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "mimir"},
+            "expr": "sum by (channel, status) (rate(gosentinel_alertmanager_notifications_total[5m]))",
+            "legendFormat": "{{channel}} / {{status}}"
+          }]
+        },
+        {
+          "id": 6,
+          "title": "Notification Delivery Latency (p99)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "mimir"},
+            "expr": "histogram_quantile(0.99, sum by (channel, le) (rate(gosentinel_alertmanager_notification_duration_seconds_bucket[5m])))",
+            "legendFormat": "{{channel}} p99"
+          }],
+          "fieldConfig": {"defaults": {"unit": "s"}}
+        },
+        {
+          "id": 7,
+          "title": "Alert Events by State",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "mimir"},
+            "expr": "sum by (state, severity) (rate(gosentinel_alertmanager_alerts_total[5m]))",
+            "legendFormat": "{{state}} / {{severity}}"
+          }]
+        },
+        {
+          "id": 8,
+          "title": "OTel Collector — Spans Received",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "mimir"},
+            "expr": "rate(otelcol_receiver_accepted_spans[5m])",
+            "legendFormat": "Accepted spans/s"
+          }, {
+            "datasource": {"type": "prometheus", "uid": "mimir"},
+            "expr": "rate(otelcol_receiver_refused_spans[5m])",
+            "legendFormat": "Refused spans/s"
+          }]
+        },
+        {
+          "id": 9,
+          "title": "OTel Collector — Metrics Points",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "mimir"},
+            "expr": "rate(otelcol_receiver_accepted_metric_points[5m])",
+            "legendFormat": "Accepted points/s"
+          }]
+        },
+        {
+          "id": 10,
+          "title": "OTel Collector — Log Records",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "mimir"},
+            "expr": "rate(otelcol_receiver_accepted_log_records[5m])",
+            "legendFormat": "Accepted logs/s"
+          }]
+        }
+      ]
+    }

@@ -1,0 +1,82 @@
+################################################################################
+# ConfigMap — all service endpoints for Minikube (single-node, no FQDN needed)
+################################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gosentinel-config
+  namespace: gosentinel
+data:
+  otlp_endpoint:             "otel-collector.gosentinel.svc.cluster.local:4317"
+  victoria_metrics_endpoint: "http://victoriametrics.gosentinel.svc.cluster.local:8428"
+  jaeger_endpoint:           "jaeger.gosentinel.svc.cluster.local:16685"
+  loki_endpoint:             "http://loki.gosentinel.svc.cluster.local:3100"
+  pyroscope_endpoint:        "http://pyroscope.gosentinel.svc.cluster.local:4040"
+  api_addr:                  "http://gosentinel-api.gosentinel.svc.cluster.local:8080"
+  tempo_endpoint:            "http://tempo.gosentinel.svc.cluster.local:3200"
+  mimir_endpoint:            "http://mimir.gosentinel.svc.cluster.local:9009"
+---
+################################################################################
+# Alert rules ConfigMap
+################################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gosentinel-alert-rules
+  namespace: gosentinel
+data:
+  alert-rules.yaml: |
+    rules:
+      - name: "High error rate"
+        expr: 'rate(http_requests_total{status=~"5.."}[5m]) > 0.05'
+        for: 2m
+        severity: critical
+        annotations:
+          summary: "Service error rate above 5%"
+        notify: [slack, gmail]
+
+      - name: "High p99 latency"
+        expr: 'histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 1.0'
+        for: 5m
+        severity: warning
+        annotations:
+          summary: "P99 latency above 1 second"
+        notify: [slack, gmail]
+
+      - name: "Service down"
+        expr: 'up == 0'
+        for: 1m
+        severity: critical
+        annotations:
+          summary: "Service is down"
+        notify: [slack, gmail]
+
+      - name: "High memory usage"
+        expr: 'process_resident_memory_bytes > 500000000'
+        for: 10m
+        severity: warning
+        annotations:
+          summary: "Process memory above 500MB"
+        notify: [slack, gmail]
+---
+################################################################################
+# Secret — fill in real values before deploying
+################################################################################
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gosentinel-secrets
+  namespace: gosentinel
+type: Opaque
+stringData:
+  postgres_dsn:          "postgres://gosentinel:gosentinel@postgres.gosentinel.svc.cluster.local:5432/gosentinel?sslmode=disable"
+  jwt_secret:            "dev-jwt-secret-change-in-production-32c"
+  slack_webhook:         ""
+  pagerduty_key:         ""
+  gmail_username:        ""
+  gmail_password:        ""
+  gmail_to:              ""
+  opsgenie_key:          ""
+  teams_webhook:         ""
+  webhook_url:           ""
+  webhook_secret:        ""

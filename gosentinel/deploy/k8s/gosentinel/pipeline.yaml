@@ -135,6 +135,58 @@ spec:
                   name: gosentinel-secrets
                   key: pagerduty_key
                   optional: true
+            - name: GOSENTINEL_ALERTING_GMAIL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: gmail_username
+                  optional: true
+            - name: GOSENTINEL_ALERTING_GMAIL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: gmail_password
+                  optional: true
+            - name: GOSENTINEL_ALERTING_GMAIL_TO
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: gmail_to
+                  optional: true
+            - name: GOSENTINEL_ALERTING_OPSGENIE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: opsgenie_key
+                  optional: true
+            - name: GOSENTINEL_ALERTING_OPSGENIE_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: opsgenie_region
+                  optional: true
+            - name: GOSENTINEL_ALERTING_TEAMS_WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: teams_webhook
+                  optional: true
+            - name: GOSENTINEL_ALERTING_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: webhook_url
+                  optional: true
+            - name: GOSENTINEL_ALERTING_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: webhook_secret
+                  optional: true
+            - name: GOSENTINEL_ALERTING_DEDUP_TTL
+              value: "10m"
+            - name: GOSENTINEL_ALERTING_RULES_FILE
+              value: /config/alert-rules.yaml
             # Pod identity for trace correlation
             - name: POD_NAME
               valueFrom:

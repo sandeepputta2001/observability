@@ -16,24 +16,49 @@ github.com/yourorg/gosentinel
 │   ├── slo/                  — SLO burn rate tracking
 │   ├── alerting/             — rule evaluation + notifiers + escalation + grouping
 │   │   ├── evaluator.go      — RuleEvaluator (MetricsQL → state machine → AlertManager)
-│   │   ├── manager.go        — AlertManager (routing, dedup, retry, fan-out)
+│   │   ├── evaluator_test.go — unit tests for rule evaluation
+│   │   ├── manager.go        — AlertManager (routing, dedup, retry, fan-out, metrics)
 │   │   ├── notifier.go       — Slack, Gmail, PagerDuty, OpsGenie, Teams, Webhook
-│   │   ├── escalation.go     — EscalationPolicy (time/severity-based channel escalation)
+│   │   ├── escalation.go     — EscalationPolicy (time-based channel escalation)
 │   │   ├── grouping.go       — AlertGrouper (batch correlated alerts, reduce noise)
 │   │   ├── metrics.go        — AlertManagerMetrics (Prometheus instrumentation)
 │   │   ├── routing.go        — RoutingConfig (per-rule channel map)
 │   │   ├── store.go          — AlertStore + SilenceManager
 │   │   ├── notification_log.go — NotificationLog (audit ring buffer)
 │   │   └── hmac.go           — HMAC-SHA256 webhook signing
-│   ├── storage/              — backend client wrappers
+│   ├── storage/              — backend client wrappers (Jaeger, VM, Loki, Pyroscope)
 │   ├── metrics/              — RED/USE/Golden Signal metrics
 │   ├── health/               — structured health checks
 │   └── tracing/              — distributed tracing helpers
 ├── pkg/
 │   ├── otel/                 — shared OTel SDK bootstrap
-│   ├── middleware/           — HTTP middleware chain
+│   ├── middleware/           — HTTP middleware chain (JWT, rate limiter, OTel)
 │   └── config/               — Viper config loader
-└── gen/go/gosentinel/v1/     — generated proto stubs
+├── scripts/
+│   ├── minikube-up.sh        — start Minikube + deploy full LGTM stack + GoSentinel
+│   └── minikube-down.sh      — tear down Minikube namespace or cluster
+├── config/
+│   ├── alert-rules.yaml      — alert rule definitions (MetricsQL expressions)
+│   ├── otel-collector.yaml   — OTel Collector config (local dev)
+│   └── prometheus.yml        — Prometheus scrape config (local dev)
+├── deploy/
+│   ├── docker/               — Dockerfiles (pipeline, api, ui)
+│   ├── grafana/              — Grafana provisioning (datasources, dashboards)
+│   ├── helm/gosentinel/      — Helm chart (Chart.yaml, values.yaml, templates/)
+│   ├── k8s/
+│   │   ├── minikube/         — Minikube-optimised manifests (00–06)
+│   │   ├── gosentinel/       — Production manifests (api, pipeline, ui, configmap)
+│   │   ├── monitoring/       — ServiceMonitors + PrometheusRules
+│   │   ├── network/          — NetworkPolicies
+│   │   └── rbac/             — ServiceAccounts, Roles, RoleBindings
+│   └── sql/                  — PostgreSQL migrations
+├── examples/services/        — Instrumented example microservices
+├── gen/go/gosentinel/v1/     — generated proto stubs
+└── docs/
+    ├── HLD.md                — High-Level Design
+    ├── LLD.md                — Low-Level Design
+    ├── architecture.md       — Component diagram + signal flow
+    └── adr/                  — Architecture Decision Records (001–004)
 ```
 
 ---
@@ -576,3 +601,139 @@ Test patterns used:
   "channels": ["pagerduty", "gmail", "slack"]
 }
 ```
+
+---
+
+## 17. OTel Collector — LGTM Fan-Out Design
+
+### Pipeline configuration (Minikube)
+
+```yaml
+receivers:
+  otlp:          # OTLP gRPC :4317 + HTTP :4318
+  prometheus:    # scrape GoSentinel pipeline + API /metrics
+
+processors:
+  memory_limiter:   # 400 MiB limit, check every 1s
+  resource:         # inject deployment.environment, k8s.cluster.name
+  batch:            # 5s timeout, 512 max batch size
+  tail_sampling:    # always-errors | high-latency(500ms) | probabilistic(10%)
+
+exporters:
+  otlp/tempo:                    # traces → Tempo :4317
+  otlp/jaeger:                   # traces → Jaeger :4317 (compat)
+  prometheusremotewrite/mimir:   # metrics → Mimir :9009/api/v1/push
+  prometheusremotewrite/vm:      # metrics → VictoriaMetrics :8428/api/v1/write
+  loki:                          # logs → Loki :3100/loki/api/v1/push
+
+service:
+  pipelines:
+    traces:  [otlp] → [memory_limiter, resource, batch, tail_sampling] → [tempo, jaeger]
+    metrics: [otlp, prometheus] → [memory_limiter, resource, batch] → [mimir, vm]
+    logs:    [otlp] → [memory_limiter, resource, batch] → [loki]
+```
+
+### Tail sampling decision logic
+
+```
+For each trace (after bufferTTL = 10s):
+  1. AlwaysSampleErrors  — any span with status=ERROR → keep
+  2. LatencyPolicy       — any span with duration >= 500ms → keep
+  3. ProbabilisticPolicy — rand.Float64() < 0.10 → keep
+  4. Otherwise           → drop
+
+Decision wait: 10s (collect all spans before deciding)
+Buffer: 1000 traces in-flight
+```
+
+---
+
+## 18. Minikube Deployment — Manifest Structure
+
+```
+deploy/k8s/minikube/
+├── 00-namespace.yaml        — gosentinel namespace
+├── 01-configmap.yaml        — ConfigMap (service endpoints) + alert rules + Secret template
+├── 02-postgres.yaml         — PostgreSQL 16 + PVC (2Gi) + health probes
+├── 03-lgtm-stack.yaml       — Loki, Tempo, Mimir, Grafana, VictoriaMetrics, Jaeger, Pyroscope
+│                              (25 Kubernetes documents, ~1200 lines)
+├── 04-otel-collector.yaml   — OTel Collector with LGTM fan-out config
+├── 05-gosentinel.yaml       — Pipeline, API, UI (single replica, NodePort, initContainers)
+└── 06-grafana-dashboard.yaml — GoSentinel Overview dashboard (JSON embedded in ConfigMap)
+```
+
+### Deployment ordering (enforced by initContainers)
+
+```
+postgres ──► victoriametrics ──► loki ──► tempo ──► mimir ──► jaeger ──► pyroscope
+    │
+    └──► otel-collector
+              │
+              └──► gosentinel-pipeline (waits: postgres + victoriametrics + db-migrate)
+                        │
+                        └──► gosentinel-api (waits: pipeline /health)
+                                  │
+                                  └──► gosentinel-ui (waits: api /health)
+```
+
+### Minikube vs Production differences
+
+| Aspect | Minikube | Production |
+|--------|----------|-----------|
+| Replicas | 1 each | 2-3 (API: 3) |
+| HPA | None | Yes (CPU/Memory) |
+| PDB | None | Yes (minAvailable) |
+| TopologySpread | None | Yes (zone + hostname) |
+| Security context | Basic | Full (readOnlyRootFilesystem, seccomp, drop ALL) |
+| Ingress | None | Yes (TLS, NGINX annotations) |
+| Image pull | `Never` (local) | `IfNotPresent` (registry) |
+| Service type | NodePort | ClusterIP + Ingress |
+| Resource limits | Dev-sized | Production-sized |
+
+### Grafana datasource correlation chain
+
+```
+Loki log line
+  └── derived field: trace_id → Tempo link
+        └── Tempo trace
+              ├── service map (from Mimir span metrics)
+              ├── span metrics (calls_total, duration_seconds)
+              └── trace-to-log link → Loki
+```
+
+---
+
+## 19. Makefile Target Reference
+
+| Category | Target | Description |
+|----------|--------|-------------|
+| Build | `build` | Compile all binaries to `./bin/` |
+| Build | `build-linux` | Cross-compile for linux/amd64 |
+| Test | `test` | All tests with race detector |
+| Test | `test-short` | Skip integration tests |
+| Test | `test-alerting` | Alerting package only |
+| Test | `coverage` | HTML coverage report |
+| Lint | `lint` / `fmt` / `vet` | Code quality |
+| Proto | `proto-gen` / `proto-lint` | Protobuf generation |
+| Docker | `docker-up` / `docker-down` | Local dev stack |
+| Docker | `docker-build` / `docker-push` | Image management |
+| K8s | `k8s-apply` / `k8s-delete` | Production manifests |
+| K8s | `k8s-status` / `k8s-logs` | Production status |
+| Helm | `helm-install` / `helm-uninstall` | Helm deployment |
+| Helm | `helm-lint` / `helm-template` | Helm validation |
+| Minikube | `minikube-up` | Full deploy (start + build + apply) |
+| Minikube | `minikube-up-skip-build` | Deploy without rebuilding images |
+| Minikube | `minikube-down` / `minikube-delete` | Tear down |
+| Minikube | `minikube-status` | Pod/service/PVC status |
+| Minikube | `minikube-pf` | Port-forward all services |
+| Minikube | `minikube-rebuild` | Rebuild images + restart |
+| Minikube | `minikube-test-alert` | Send test notification |
+| Minikube | `minikube-channels` | List registered channels |
+| Minikube | `minikube-silence` | Create alert silence |
+| Minikube | `minikube-routing` | Update alert routing |
+| Minikube | `minikube-grafana` / `minikube-ui` | Open in browser |
+| Minikube | `minikube-logs-pipeline` / `minikube-logs-otel` | Tail logs |
+| Minikube | `minikube-logs-all` | Tail all component logs |
+| Terraform | `tf-init` / `tf-plan` / `tf-apply` | Infrastructure |
+| Database | `db-migrate` / `db-migrate-minikube` | Schema migrations |
+| Util | `clean` / `help` | Housekeeping |

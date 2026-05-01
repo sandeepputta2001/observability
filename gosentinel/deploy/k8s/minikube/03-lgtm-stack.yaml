@@ -1,0 +1,893 @@
+################################################################################
+# LGTM Stack for Minikube
+# L — Loki   (logs)
+# G — Grafana (dashboards)
+# T — Tempo   (traces — replaces Jaeger for LGTM)
+# M — Mimir   (metrics — replaces VictoriaMetrics for LGTM)
+#
+# We also keep VictoriaMetrics and Jaeger for GoSentinel's internal clients
+# (they reference those endpoints). Grafana is wired to ALL backends.
+################################################################################
+
+# ── Loki ─────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-pvc
+  namespace: gosentinel
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+  namespace: gosentinel
+data:
+  local-config.yaml: |
+    auth_enabled: false
+    server:
+      http_listen_port: 3100
+      grpc_listen_port: 9096
+    common:
+      instance_addr: 127.0.0.1
+      path_prefix: /loki
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+    query_range:
+      results_cache:
+        cache:
+          embedded_cache:
+            enabled: true
+            max_size_mb: 100
+    schema_config:
+      configs:
+        - from: 2020-10-24
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    ruler:
+      alertmanager_url: http://localhost:9093
+    analytics:
+      reporting_enabled: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: gosentinel
+  labels:
+    app: loki
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loki
+  template:
+    metadata:
+      labels:
+        app: loki
+    spec:
+      securityContext:
+        fsGroup: 10001
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: loki
+          image: grafana/loki:3.0.0
+          args: ["-config.file=/etc/loki/local-config.yaml"]
+          ports:
+            - name: http
+              containerPort: 3100
+            - name: grpc
+              containerPort: 9096
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+            - name: data
+              mountPath: /loki
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3100
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 3100
+            initialDelaySeconds: 30
+            periodSeconds: 15
+      volumes:
+        - name: config
+          configMap:
+            name: loki-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: loki-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: gosentinel
+spec:
+  selector:
+    app: loki
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100
+    - name: grpc
+      port: 9096
+      targetPort: 9096
+
+---
+# ── Tempo (Traces) ────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tempo-pvc
+  namespace: gosentinel
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-config
+  namespace: gosentinel
+data:
+  tempo.yaml: |
+    server:
+      http_listen_port: 3200
+      grpc_listen_port: 9095
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:4317
+            http:
+              endpoint: 0.0.0.0:4318
+        jaeger:
+          protocols:
+            thrift_http:
+              endpoint: 0.0.0.0:14268
+            grpc:
+              endpoint: 0.0.0.0:14250
+    ingester:
+      max_block_duration: 5m
+    compactor:
+      compaction:
+        block_retention: 48h
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces
+        wal:
+          path: /var/tempo/wal
+    metrics_generator:
+      registry:
+        external_labels:
+          source: tempo
+          cluster: minikube
+      storage:
+        path: /var/tempo/generator/wal
+        remote_write:
+          - url: http://mimir.gosentinel.svc.cluster.local:9009/api/v1/push
+            send_exemplars: true
+    overrides:
+      defaults:
+        metrics_generator:
+          processors: [service-graphs, span-metrics]
+          generate_native_histograms: both
+    analytics:
+      reporting_enabled: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: gosentinel
+  labels:
+    app: tempo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempo
+  template:
+    metadata:
+      labels:
+        app: tempo
+    spec:
+      securityContext:
+        fsGroup: 10001
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: tempo
+          image: grafana/tempo:2.4.1
+          args: ["-config.file=/etc/tempo/tempo.yaml"]
+          ports:
+            - name: http
+              containerPort: 3200
+            - name: grpc
+              containerPort: 9095
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+            - name: jaeger-grpc
+              containerPort: 14250
+            - name: jaeger-http
+              containerPort: 14268
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo
+            - name: data
+              mountPath: /var/tempo
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            initialDelaySeconds: 30
+            periodSeconds: 15
+      volumes:
+        - name: config
+          configMap:
+            name: tempo-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: tempo-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: gosentinel
+spec:
+  selector:
+    app: tempo
+  ports:
+    - name: http
+      port: 3200
+      targetPort: 3200
+    - name: grpc
+      port: 9095
+      targetPort: 9095
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+    - name: jaeger-grpc
+      port: 14250
+      targetPort: 14250
+    - name: jaeger-http
+      port: 14268
+      targetPort: 14268
+
+---
+# ── Mimir (Metrics) ───────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mimir-pvc
+  namespace: gosentinel
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mimir-config
+  namespace: gosentinel
+data:
+  mimir.yaml: |
+    # Single-binary Mimir for Minikube (no HA, no object storage)
+    target: all
+    multitenancy_enabled: false
+    server:
+      http_listen_port: 9009
+      grpc_listen_port: 9095
+      log_level: warn
+    blocks_storage:
+      backend: filesystem
+      filesystem:
+        dir: /data/blocks
+      tsdb:
+        dir: /data/tsdb
+    compactor:
+      data_dir: /data/compactor
+    distributor:
+      ring:
+        instance_addr: 127.0.0.1
+        kvstore:
+          store: memberlist
+    ingester:
+      ring:
+        instance_addr: 127.0.0.1
+        kvstore:
+          store: memberlist
+        replication_factor: 1
+    ruler_storage:
+      backend: filesystem
+      filesystem:
+        dir: /data/rules
+    store_gateway:
+      sharding_ring:
+        replication_factor: 1
+    memberlist:
+      join_members: []
+    analytics:
+      reporting_enabled: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mimir
+  namespace: gosentinel
+  labels:
+    app: mimir
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mimir
+  template:
+    metadata:
+      labels:
+        app: mimir
+    spec:
+      securityContext:
+        fsGroup: 10001
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: mimir
+          image: grafana/mimir:2.12.0
+          args: ["-config.file=/etc/mimir/mimir.yaml"]
+          ports:
+            - name: http
+              containerPort: 9009
+            - name: grpc
+              containerPort: 9095
+          volumeMounts:
+            - name: config
+              mountPath: /etc/mimir
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 9009
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 9009
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 5
+      volumes:
+        - name: config
+          configMap:
+            name: mimir-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: mimir-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mimir
+  namespace: gosentinel
+spec:
+  selector:
+    app: mimir
+  ports:
+    - name: http
+      port: 9009
+      targetPort: 9009
+    - name: grpc
+      port: 9095
+      targetPort: 9095
+
+---
+# ── VictoriaMetrics (kept for GoSentinel pipeline compatibility) ──────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: victoriametrics-pvc
+  namespace: gosentinel
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victoriametrics
+  namespace: gosentinel
+  labels:
+    app: victoriametrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: victoriametrics
+  template:
+    metadata:
+      labels:
+        app: victoriametrics
+    spec:
+      containers:
+        - name: victoriametrics
+          image: victoriametrics/victoria-metrics:v1.99.0
+          args:
+            - -storageDataPath=/storage
+            - -retentionPeriod=7d
+          ports:
+            - name: http
+              containerPort: 8428
+          volumeMounts:
+            - name: data
+              mountPath: /storage
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8428
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8428
+            initialDelaySeconds: 20
+            periodSeconds: 15
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: victoriametrics-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoriametrics
+  namespace: gosentinel
+spec:
+  selector:
+    app: victoriametrics
+  ports:
+    - name: http
+      port: 8428
+      targetPort: 8428
+
+---
+# ── Jaeger (kept for GoSentinel API compatibility) ────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: gosentinel
+  labels:
+    app: jaeger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:1.57
+          env:
+            - name: COLLECTOR_OTLP_ENABLED
+              value: "true"
+            - name: SPAN_STORAGE_TYPE
+              value: memory
+            - name: MEMORY_MAX_TRACES
+              value: "10000"
+          ports:
+            - name: ui
+              containerPort: 16686
+            - name: grpc-query
+              containerPort: 16685
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: health
+              containerPort: 14269
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 14269
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 14269
+            initialDelaySeconds: 20
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: gosentinel
+spec:
+  selector:
+    app: jaeger
+  ports:
+    - name: ui
+      port: 16686
+      targetPort: 16686
+    - name: grpc-query
+      port: 16685
+      targetPort: 16685
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+
+---
+# ── Pyroscope (Continuous Profiling) ─────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pyroscope-pvc
+  namespace: gosentinel
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pyroscope
+  namespace: gosentinel
+  labels:
+    app: pyroscope
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pyroscope
+  template:
+    metadata:
+      labels:
+        app: pyroscope
+    spec:
+      securityContext:
+        fsGroup: 10001
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: pyroscope
+          image: grafana/pyroscope:1.5.0
+          ports:
+            - name: http
+              containerPort: 4040
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 4040
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 4040
+            initialDelaySeconds: 30
+            periodSeconds: 15
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pyroscope-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyroscope
+  namespace: gosentinel
+spec:
+  selector:
+    app: pyroscope
+  ports:
+    - name: http
+      port: 4040
+      targetPort: 4040
+
+---
+# ── Grafana (LGTM Dashboard) ──────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-pvc
+  namespace: gosentinel
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: gosentinel
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      # Mimir — primary metrics (LGTM stack)
+      - name: Mimir
+        type: prometheus
+        access: proxy
+        url: http://mimir.gosentinel.svc.cluster.local:9009/prometheus
+        isDefault: true
+        uid: mimir
+        jsonData:
+          timeInterval: 15s
+          httpMethod: POST
+
+      # VictoriaMetrics — GoSentinel pipeline metrics
+      - name: VictoriaMetrics
+        type: prometheus
+        access: proxy
+        url: http://victoriametrics.gosentinel.svc.cluster.local:8428
+        uid: victoriametrics
+        jsonData:
+          timeInterval: 15s
+
+      # Loki — logs
+      - name: Loki
+        type: loki
+        access: proxy
+        url: http://loki.gosentinel.svc.cluster.local:3100
+        uid: loki
+        jsonData:
+          derivedFields:
+            - datasourceUid: tempo
+              matcherRegex: '"trace_id":"(\w+)"'
+              name: TraceID
+              url: '$${__value.raw}'
+
+      # Tempo — traces (LGTM stack)
+      - name: Tempo
+        type: tempo
+        access: proxy
+        url: http://tempo.gosentinel.svc.cluster.local:3200
+        uid: tempo
+        jsonData:
+          tracesToLogsV2:
+            datasourceUid: loki
+            spanStartTimeShift: '-1h'
+            spanEndTimeShift: '1h'
+            filterByTraceID: true
+            filterBySpanID: false
+          tracesToMetrics:
+            datasourceUid: mimir
+            queries:
+              - name: Request rate
+                query: 'rate(traces_spanmetrics_calls_total{$$__tags}[5m])'
+          serviceMap:
+            datasourceUid: mimir
+          nodeGraph:
+            enabled: true
+          lokiSearch:
+            datasourceUid: loki
+
+      # Jaeger — traces (GoSentinel API compatibility)
+      - name: Jaeger
+        type: jaeger
+        access: proxy
+        url: http://jaeger.gosentinel.svc.cluster.local:16686
+        uid: jaeger
+
+      # Pyroscope — continuous profiling
+      - name: Pyroscope
+        type: grafana-pyroscope-datasource
+        access: proxy
+        url: http://pyroscope.gosentinel.svc.cluster.local:4040
+        uid: pyroscope
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-provider
+  namespace: gosentinel
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: GoSentinel
+        orgId: 1
+        folder: GoSentinel
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: gosentinel
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      securityContext:
+        fsGroup: 472
+        runAsUser: 472
+        runAsGroup: 472
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.0.0
+          env:
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Admin
+            - name: GF_AUTH_DISABLE_LOGIN_FORM
+              value: "false"
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: "gosentinel"
+            - name: GF_SECURITY_ADMIN_USER
+              value: "admin"
+            - name: GF_INSTALL_PLUGINS
+              value: "grafana-pyroscope-app"
+            - name: GF_FEATURE_TOGGLES_ENABLE
+              value: "traceqlEditor traceQLStreaming metricsSummary"
+            - name: GF_SERVER_ROOT_URL
+              value: "%(protocol)s://%(domain)s:%(http_port)s/"
+          ports:
+            - name: http
+              containerPort: 3000
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboards-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+            - name: data
+              mountPath: /var/lib/grafana
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboards-provider
+          configMap:
+            name: grafana-dashboards-provider
+        - name: dashboards
+          configMap:
+            name: grafana-dashboard-gosentinel
+        - name: data
+          persistentVolumeClaim:
+            claimName: grafana-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: gosentinel
+spec:
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+  type: NodePort

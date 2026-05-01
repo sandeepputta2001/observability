@@ -13,6 +13,9 @@ data:
   loki_endpoint:               "http://loki.gosentinel.svc.cluster.local:3100"
   pyroscope_endpoint:          "http://pyroscope.gosentinel.svc.cluster.local:4040"
   api_addr:                    "http://gosentinel-api.gosentinel.svc.cluster.local:8080"
+  # LGTM stack endpoints (used by Grafana datasources)
+  tempo_endpoint:              "http://tempo.gosentinel.svc.cluster.local:3200"
+  mimir_endpoint:              "http://mimir.gosentinel.svc.cluster.local:9009"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -28,7 +31,8 @@ data:
         severity: critical
         annotations:
           summary: "Service error rate above 5%"
-        notify: [slack, pagerduty]
+          description: "Error rate is {{ $value | humanize }} req/s"
+        notify: [slack, pagerduty, gmail, opsgenie, teams]
 
       - name: "High p99 latency"
         expr: 'histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 1.0'
@@ -36,7 +40,7 @@ data:
         severity: warning
         annotations:
           summary: "P99 latency above 1 second"
-        notify: [slack]
+        notify: [slack, gmail, webhook, teams]
 
       - name: "Service down"
         expr: 'up == 0'
@@ -44,25 +48,39 @@ data:
         severity: critical
         annotations:
           summary: "Service is down"
-        notify: [slack, pagerduty]
+        notify: [slack, pagerduty, gmail, opsgenie, webhook, teams]
 
-      - name: "Error budget burn rate fast"
-        expr: 'gosentinel_slo_burn_rate > 14.4'
+      - name: "High memory usage"
+        expr: 'process_resident_memory_bytes > 500000000'
+        for: 10m
+        severity: warning
+        annotations:
+          summary: "Process memory above 500MB"
+        notify: [slack, gmail, teams]
+
+      - name: "SLO burn rate fast"
+        expr: 'gosentinel_slo_burn_rate{window="1h"} > 14.4'
         for: 2m
         severity: critical
         annotations:
-          summary: "SLO fast burn rate exceeded (2% budget in 1h)"
-        notify: [slack, pagerduty]
+          summary: "SLO fast burn rate exceeded (1h window)"
+          description: "Burn rate {{ $value | humanize }}x — error budget will be exhausted in < 1 hour"
+        notify: [slack, pagerduty, gmail, opsgenie, teams]
 
-      - name: "Anomaly detected"
-        expr: 'gosentinel_anomaly_z_score > 3'
-        for: 0s
+      - name: "SLO burn rate slow"
+        expr: 'gosentinel_slo_burn_rate{window="6h"} > 6.0'
+        for: 15m
         severity: warning
         annotations:
-          summary: "EWMA anomaly detected"
-        notify: [slack]
+          summary: "SLO slow burn rate exceeded (6h window)"
+        notify: [slack, gmail, webhook, teams]
 ---
-# Secret template — in production, use External Secrets Operator or Sealed Secrets
+# Secret template — in production use External Secrets Operator or Sealed Secrets
+# kubectl create secret generic gosentinel-secrets -n gosentinel \
+#   --from-literal=postgres_dsn='...' \
+#   --from-literal=jwt_secret='...' \
+#   --from-literal=slack_webhook='...' \
+#   etc.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -70,7 +88,15 @@ metadata:
   namespace: gosentinel
 type: Opaque
 stringData:
-  postgres_dsn:   "postgres://gosentinel:CHANGE_ME@postgres:5432/gosentinel?sslmode=require"
-  jwt_secret:     "CHANGE_ME_IN_PRODUCTION_USE_32_CHARS_MIN"
-  slack_webhook:  ""
-  pagerduty_key:  ""
+  postgres_dsn:      "postgres://gosentinel:CHANGE_ME@postgres:5432/gosentinel?sslmode=require"
+  jwt_secret:        "CHANGE_ME_IN_PRODUCTION_USE_32_CHARS_MIN"
+  slack_webhook:     ""
+  pagerduty_key:     ""
+  gmail_username:    ""
+  gmail_password:    ""
+  gmail_to:          ""
+  opsgenie_key:      ""
+  opsgenie_region:   "us"
+  teams_webhook:     ""
+  webhook_url:       ""
+  webhook_secret:    ""

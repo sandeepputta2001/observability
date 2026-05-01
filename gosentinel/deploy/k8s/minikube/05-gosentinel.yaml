@@ -1,0 +1,464 @@
+################################################################################
+# GoSentinel Application — Pipeline, API, UI
+# Minikube-optimised: single replica, NodePort services, no HPA/PDB
+################################################################################
+
+# ── Pipeline ──────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gosentinel-pipeline
+  namespace: gosentinel
+  labels:
+    app: gosentinel-pipeline
+    app.kubernetes.io/name: gosentinel-pipeline
+    app.kubernetes.io/component: pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gosentinel-pipeline
+  template:
+    metadata:
+      labels:
+        app: gosentinel-pipeline
+        app.kubernetes.io/name: gosentinel-pipeline
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      initContainers:
+        - name: wait-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z postgres.gosentinel.svc.cluster.local 5432; do
+                echo "waiting for postgres..."; sleep 3
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+        - name: wait-victoriametrics
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until wget -q -O- http://victoriametrics.gosentinel.svc.cluster.local:8428/health; do
+                echo "waiting for victoriametrics..."; sleep 3
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+        - name: db-migrate
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              psql "$GOSENTINEL_POSTGRES_DSN" -c "
+                CREATE TABLE IF NOT EXISTS alert_states (
+                  rule_name  TEXT PRIMARY KEY,
+                  state      TEXT NOT NULL CHECK (state IN ('pending', 'firing')),
+                  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+              "
+          env:
+            - name: GOSENTINEL_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: postgres_dsn
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
+      containers:
+        - name: pipeline
+          image: gosentinel/pipeline:dev
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 9090
+          env:
+            - name: GOSENTINEL_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: otlp_endpoint
+            - name: GOSENTINEL_VICTORIA_METRICS_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: victoria_metrics_endpoint
+            - name: GOSENTINEL_LOKI_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: loki_endpoint
+            - name: GOSENTINEL_JAEGER_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: jaeger_endpoint
+            - name: GOSENTINEL_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: postgres_dsn
+            - name: GOSENTINEL_ALERTING_RULES_FILE
+              value: /config/alert-rules.yaml
+            - name: GOSENTINEL_ALERTING_DEDUP_TTL
+              value: "10m"
+            # Alert channels — set via Secret
+            - name: GOSENTINEL_ALERTING_SLACK_WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: slack_webhook
+                  optional: true
+            - name: GOSENTINEL_ALERTING_GMAIL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: gmail_username
+                  optional: true
+            - name: GOSENTINEL_ALERTING_GMAIL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: gmail_password
+                  optional: true
+            - name: GOSENTINEL_ALERTING_GMAIL_TO
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: gmail_to
+                  optional: true
+            - name: GOSENTINEL_ALERTING_OPSGENIE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: opsgenie_key
+                  optional: true
+            - name: GOSENTINEL_ALERTING_TEAMS_WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: teams_webhook
+                  optional: true
+            - name: GOSENTINEL_ALERTING_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: webhook_url
+                  optional: true
+            - name: GOSENTINEL_ALERTING_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: webhook_secret
+                  optional: true
+          volumeMounts:
+            - name: alert-rules
+              mountPath: /config
+              readOnly: true
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: alert-rules
+          configMap:
+            name: gosentinel-alert-rules
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gosentinel-pipeline
+  namespace: gosentinel
+  labels:
+    app: gosentinel-pipeline
+    app.kubernetes.io/name: gosentinel-pipeline
+spec:
+  selector:
+    app: gosentinel-pipeline
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+  type: NodePort
+
+---
+# ── API ───────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gosentinel-api
+  namespace: gosentinel
+  labels:
+    app: gosentinel-api
+    app.kubernetes.io/name: gosentinel-api
+    app.kubernetes.io/component: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gosentinel-api
+  template:
+    metadata:
+      labels:
+        app: gosentinel-api
+        app.kubernetes.io/name: gosentinel-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      initContainers:
+        - name: wait-pipeline
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until wget -q -O- http://gosentinel-pipeline.gosentinel.svc.cluster.local:9090/health; do
+                echo "waiting for pipeline..."; sleep 3
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+      containers:
+        - name: api
+          image: gosentinel/api:dev
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: GOSENTINEL_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: otlp_endpoint
+            - name: GOSENTINEL_VICTORIA_METRICS_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: victoria_metrics_endpoint
+            - name: GOSENTINEL_JAEGER_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: jaeger_endpoint
+            - name: GOSENTINEL_LOKI_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: loki_endpoint
+            - name: GOSENTINEL_PYROSCOPE_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: pyroscope_endpoint
+            - name: GOSENTINEL_API_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: jwt_secret
+            - name: GOSENTINEL_API_RATE_LIMIT
+              value: "100"
+            # Alert channels for test-notification endpoint
+            - name: GOSENTINEL_ALERTING_SLACK_WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: slack_webhook
+                  optional: true
+            - name: GOSENTINEL_ALERTING_GMAIL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: gmail_username
+                  optional: true
+            - name: GOSENTINEL_ALERTING_GMAIL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: gmail_password
+                  optional: true
+            - name: GOSENTINEL_ALERTING_GMAIL_TO
+              valueFrom:
+                secretKeyRef:
+                  name: gosentinel-secrets
+                  key: gmail_to
+                  optional: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gosentinel-api
+  namespace: gosentinel
+  labels:
+    app: gosentinel-api
+    app.kubernetes.io/name: gosentinel-api
+spec:
+  selector:
+    app: gosentinel-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: NodePort
+
+---
+# ── UI ────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gosentinel-ui
+  namespace: gosentinel
+  labels:
+    app: gosentinel-ui
+    app.kubernetes.io/name: gosentinel-ui
+    app.kubernetes.io/component: ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gosentinel-ui
+  template:
+    metadata:
+      labels:
+        app: gosentinel-ui
+        app.kubernetes.io/name: gosentinel-ui
+    spec:
+      initContainers:
+        - name: wait-api
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until wget -q -O- http://gosentinel-api.gosentinel.svc.cluster.local:8080/health; do
+                echo "waiting for api..."; sleep 3
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+      containers:
+        - name: ui
+          image: gosentinel/ui:dev
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: GOSENTINEL_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: otlp_endpoint
+            - name: GOSENTINEL_UI_API_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: gosentinel-config
+                  key: api_addr
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gosentinel-ui
+  namespace: gosentinel
+  labels:
+    app: gosentinel-ui
+    app.kubernetes.io/name: gosentinel-ui
+spec:
+  selector:
+    app: gosentinel-ui
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+  type: NodePort

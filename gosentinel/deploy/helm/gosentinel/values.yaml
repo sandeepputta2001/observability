@@ -17,23 +17,28 @@ pipeline:
       memory: 512Mi
   service:
     port: 9090
+  # Alert rules file path inside the container
+  alertRulesFile: /config/alert-rules.yaml
+  # Deduplication window for notifications
+  dedupTTL: "10m"
 
 api:
   image:
     repository: gosentinel/api
     tag: "0.1.0"
     pullPolicy: IfNotPresent
-  replicaCount: 2
+  replicaCount: 3
   resources:
     requests:
       cpu: 100m
       memory: 128Mi
     limits:
-      cpu: 200m
-      memory: 256Mi
+      cpu: 500m
+      memory: 512Mi
   service:
     port: 8080
-  jwtSecret: "change-me-in-production"
+  # REQUIRED: override in production — minimum 32 characters
+  jwtSecret: ""
   rateLimit: 100
 
 ui:
@@ -47,10 +52,10 @@ ui:
       cpu: 50m
       memory: 64Mi
     limits:
-      cpu: 100m
-      memory: 128Mi
+      cpu: 200m
+      memory: 256Mi
   service:
-    type: LoadBalancer
+    type: ClusterIP
     port: 3000
 
 backends:
@@ -61,8 +66,45 @@ backends:
   pyroscopeEndpoint: "http://pyroscope:4040"
 
 postgres:
-  dsn: "postgres://gosentinel:gosentinel@postgres:5432/gosentinel?sslmode=disable"
+  # REQUIRED: override in production
+  dsn: ""
 
+# ── Alert Channel Configuration ───────────────────────────────────────────────
+# All channels are optional. Only channels with credentials set will be registered.
 alerting:
+  # Slack incoming webhook URL
+  # Create at: https://api.slack.com/messaging/webhooks
   slackWebhook: ""
+
+  # PagerDuty Events API v2 integration key
   pagerdutyKey: ""
+
+  # Gmail SMTP configuration
+  # Use a Google App Password (NOT your account password)
+  # Generate at: https://myaccount.google.com/apppasswords
+  gmailUsername: ""
+  gmailPassword: ""
+  # Comma-separated list of recipient addresses
+  gmailTo: ""
+  # SMTP host (default: smtp.gmail.com)
+  smtpHost: "smtp.gmail.com"
+  # SMTP port: 587 (STARTTLS, default) or 465 (implicit TLS)
+  smtpPort: 587
+
+  # OpsGenie API key
+  # Create an API integration in OpsGenie
+  opsgenieKey: ""
+  # OpsGenie region: "us" (default) or "eu"
+  opsgenieRegion: "us"
+
+  # Microsoft Teams incoming webhook URL
+  # Create at: https://learn.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook
+  teamsWebhook: ""
+
+  # Generic webhook endpoint
+  webhookUrl: ""
+  # Optional HMAC-SHA256 signing secret (sent as X-GoSentinel-Signature header)
+  webhookSecret: ""
+
+  # Deduplication window — suppress duplicate notifications within this period
+  dedupTTL: "10m"

@@ -2,8 +2,8 @@
 
 A self-hosted, full-stack observability platform for Go microservice fleets.
 Collects metrics, distributed traces, structured logs, and continuous profiles —
-correlates them, detects anomalies, evaluates SLOs, and exposes everything
-through a unified query API and live dashboard.
+correlates them, detects anomalies, evaluates SLOs, fires alerts, and exposes
+everything through a unified query API, live dashboard, and Grafana LGTM stack.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -15,7 +15,8 @@ through a unified query API and live dashboard.
               ┌─────────────────────┐
               │   OTel Collector    │  tail sampling + fan-out
               └──┬──────┬──────┬───┘
-           Jaeger│  VM  │  Loki│
+         Tempo/  │  Mimir│  Loki│   ← LGTM stack (primary)
+         Jaeger  │  /VM  │      │   ← compat backends
                  ▼      ▼      ▼
          ┌──────────────────────────┐
          │   GoSentinel Pipeline    │  correlation + anomaly + SLO + alerts
@@ -24,9 +25,12 @@ through a unified query API and live dashboard.
               ┌──────────┴──────────┐
               │  GoSentinel API     │  gRPC + HTTP/JSON (ConnectRPC)
               └──────────┬──────────┘
-              ┌──────────┴──────────┐
-              │  GoSentinel UI      │  HTMX + Alpine.js + SSE
-              └─────────────────────┘
+         ┌───────────────┴───────────────┐
+         │                               │
+┌────────┴────────┐             ┌────────┴────────┐
+│  GoSentinel UI  │             │     Grafana      │
+│  HTMX + SSE     │             │  LGTM dashboards │
+└─────────────────┘             └─────────────────┘
 ```
 
 ---
@@ -41,6 +45,7 @@ through a unified query API and live dashboard.
 - **Continuous profiling** — CPU, goroutine, alloc via Pyroscope
 - **EWMA anomaly detection** — 3σ alerting, no ML dependency; anomalies forwarded to AlertManager
 - **SLO burn rate** — Google SRE Book multi-window (1h/6h/3d)
+- **Grafana LGTM stack** — Loki + Grafana + Tempo + Mimir via OpenTelemetry; trace↔log↔metric correlation
 - **Alert routing** — per-rule channel selection (Slack, Gmail, PagerDuty, OpsGenie, Teams, Webhook)
 - **Escalation policy** — time-based channel escalation (immediate → 5 min → 15 min)
 - **Alert grouping** — batch correlated alerts within 30 s window to reduce noise
@@ -49,6 +54,7 @@ through a unified query API and live dashboard.
 - **Test notifications** — fire a test alert to any channel via REST API
 - **Alert silences** — mute noisy rules with time-bounded silences
 - **Live dashboard** — HTMX auto-refresh, SSE real-time alerts
+- **Minikube deploy** — one-command local Kubernetes with full LGTM stack
 - **Production K8s** — HPA, PDB, TopologySpread, NetworkPolicy, IRSA
 - **Terraform EKS** — VPC, EKS, RDS, ECR, IAM modules
 
@@ -60,10 +66,11 @@ through a unified query API and live dashboard.
 |------|---------|---------|
 | Go | 1.22+ | Build |
 | Docker + Compose | 24+ | Local dev |
-| kubectl | 1.29+ | K8s management |
-| Helm | 3.14+ | K8s packaging |
-| Terraform | 1.7+ | Infrastructure |
-| AWS CLI | 2.x | ECR push, EKS auth |
+| minikube | 1.30+ | Local Kubernetes |
+| kubectl | 1.28+ | K8s management |
+| Helm | 3.14+ | K8s packaging (optional) |
+| Terraform | 1.7+ | Infrastructure (optional) |
+| AWS CLI | 2.x | ECR push, EKS auth (optional) |
 | buf | 1.x | Proto generation (optional) |
 | golangci-lint | 1.57+ | Linting (optional) |
 
@@ -126,13 +133,14 @@ done
 
 ### 5. Open dashboards
 
-| Service | URL |
-|---------|-----|
-| GoSentinel UI | http://localhost:3000 |
-| Grafana | http://localhost:3001 (admin/admin) |
-| Jaeger UI | http://localhost:16686 |
-| Prometheus | http://localhost:9090 |
-| Pyroscope | http://localhost:4040 |
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| GoSentinel UI | http://localhost:3000 | — |
+| Grafana | http://localhost:3001 | admin/admin |
+| Jaeger UI | http://localhost:16686 | — |
+| Prometheus | http://localhost:9090 | — |
+| Pyroscope | http://localhost:4040 | — |
+| VictoriaMetrics | http://localhost:8428 | — |
 
 ---
 
@@ -145,6 +153,9 @@ make build
 # Run all tests with race detector
 make test
 
+# Run only alerting tests
+make test-alerting
+
 # Generate coverage report
 make coverage
 
@@ -153,11 +164,189 @@ make lint
 
 # Build Docker images
 make docker-build IMAGE_TAG=v0.1.0
+
+# Show all available targets
+make help
 ```
 
 ---
 
-## Kubernetes Deployment
+## Minikube Deployment (Local Kubernetes)
+
+Deploy the full stack — LGTM observability (Loki, Grafana, Tempo, Mimir) + OpenTelemetry Collector + GoSentinel — on a local Minikube cluster with a single command.
+
+### Requirements
+
+| Tool | Version | Install |
+|------|---------|---------|
+| minikube | ≥ 1.30 | https://minikube.sigs.k8s.io/docs/start/ |
+| kubectl | ≥ 1.28 | https://kubernetes.io/docs/tasks/tools/ |
+| docker | ≥ 24 | https://docs.docker.com/get-docker/ |
+
+### Resource requirements
+
+The LGTM stack is memory-hungry. Minikube needs at least:
+
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| CPUs | 4 | 6 |
+| Memory | 6 GB | 8 GB |
+| Disk | 20 GB | 30 GB |
+
+If you have more resources, pass them as env vars:
+```bash
+MINIKUBE_CPUS=6 MINIKUBE_MEMORY=8192 make minikube-up
+```
+
+### One-command deploy
+
+```bash
+cd gosentinel
+make minikube-up
+```
+
+This will:
+1. Start Minikube (4 CPUs, 6 GB RAM, docker driver)
+2. Build `gosentinel/pipeline:dev`, `gosentinel/api:dev`, `gosentinel/ui:dev` inside Minikube's Docker daemon (no registry needed)
+3. Deploy in order: namespace → config/secrets → PostgreSQL → LGTM stack → OTel Collector → GoSentinel
+4. Wait for each component to be ready
+5. Print all access URLs
+
+### What gets deployed
+
+```
+gosentinel namespace
+├── Infrastructure
+│   ├── postgres          — alert state persistence
+│   └── otel-collector    — OTLP receiver, fan-out to all backends
+│
+├── LGTM Stack (Grafana Observability)
+│   ├── loki              — logs (port 3100)
+│   ├── tempo             — traces via OTLP (port 3200, 4317)
+│   ├── mimir             — metrics via remote_write (port 9009)
+│   ├── grafana           — dashboards (port 3000) — admin/gosentinel
+│   │
+│   └── (compatibility backends)
+│       ├── victoriametrics — GoSentinel pipeline queries (port 8428)
+│       ├── jaeger          — GoSentinel API trace queries (port 16686)
+│       └── pyroscope       — continuous profiling (port 4040)
+│
+└── GoSentinel Application
+    ├── gosentinel-pipeline — correlation + anomaly + alerting (port 9090)
+    ├── gosentinel-api      — gRPC + REST query API (port 8080)
+    └── gosentinel-ui       — HTMX dashboard (port 3000)
+```
+
+### OpenTelemetry signal routing
+
+```
+Services (OTLP) ──► otel-collector
+                         │
+                         ├── Traces  ──► Tempo (primary) + Jaeger (compat)
+                         ├── Metrics ──► Mimir (primary) + VictoriaMetrics (compat)
+                         └── Logs    ──► Loki
+```
+
+### Access the services
+
+After `make minikube-up` completes, use any of these methods:
+
+**Option A — minikube service (opens browser):**
+```bash
+make minikube-grafana    # Grafana dashboards
+make minikube-ui         # GoSentinel UI
+```
+
+**Option B — port-forward everything to localhost:**
+```bash
+make minikube-pf
+# Then open:
+#   http://localhost:3001  — Grafana (admin/gosentinel)
+#   http://localhost:3000  — GoSentinel UI
+#   http://localhost:8080  — GoSentinel API
+#   http://localhost:16686 — Jaeger UI
+#   http://localhost:3200  — Tempo
+#   http://localhost:9009  — Mimir
+```
+
+**Option C — get URLs directly:**
+```bash
+minikube service gosentinel-ui -n gosentinel --url
+minikube service grafana -n gosentinel --url
+```
+
+### Grafana datasources (pre-configured)
+
+| Datasource | Type | Backend |
+|------------|------|---------|
+| Mimir | Prometheus | Primary metrics (LGTM) |
+| VictoriaMetrics | Prometheus | GoSentinel pipeline metrics |
+| Loki | Loki | Logs with trace correlation |
+| Tempo | Tempo | Traces with service map + metrics |
+| Jaeger | Jaeger | Trace queries (compat) |
+| Pyroscope | Pyroscope | Continuous profiling |
+
+### Configure alert channels
+
+Edit the Secret in `deploy/k8s/minikube/01-configmap.yaml` before deploying, or patch after:
+
+```bash
+# Gmail
+kubectl patch secret gosentinel-secrets -n gosentinel \
+  --type='json' \
+  -p='[
+    {"op":"replace","path":"/stringData/gmail_username","value":"alerts@yourdomain.com"},
+    {"op":"replace","path":"/stringData/gmail_password","value":"xxxx-xxxx-xxxx-xxxx"},
+    {"op":"replace","path":"/stringData/gmail_to","value":"oncall@yourdomain.com"}
+  ]'
+
+# Slack
+kubectl patch secret gosentinel-secrets -n gosentinel \
+  --type='json' \
+  -p='[{"op":"replace","path":"/stringData/slack_webhook","value":"https://hooks.slack.com/..."}]'
+
+# Restart pipeline to pick up new secrets
+kubectl rollout restart deployment/gosentinel-pipeline -n gosentinel
+```
+
+### Test alert notifications
+
+```bash
+make minikube-test-alert
+# or manually:
+API_URL=$(minikube service gosentinel-api -n gosentinel --url)
+curl -X POST $API_URL/api/v1/alerts/test \
+  -H "Content-Type: application/json" \
+  -d '{"channel":"slack","severity":"critical","summary":"Test from Minikube"}'
+```
+
+### Rebuild after code changes
+
+```bash
+make minikube-rebuild
+```
+
+### Useful commands
+
+```bash
+make minikube-status            # show all pods/services/PVCs
+make minikube-logs-pipeline     # tail pipeline logs
+make minikube-logs-otel         # tail OTel collector logs
+make minikube-logs-all          # tail all component logs simultaneously
+make minikube-channels          # list registered notification channels
+kubectl get pods -n gosentinel -w   # watch pod status
+```
+
+### Tear down
+
+```bash
+make minikube-down        # delete namespace only (keeps cluster)
+make minikube-delete      # delete entire Minikube cluster
+```
+
+---
+
+## Kubernetes Deployment (Production / EKS)
 
 ### Option A — Raw manifests
 
@@ -199,7 +388,14 @@ Edit `deploy/helm/gosentinel/values.yaml` or pass `--set` flags:
 helm upgrade --install gosentinel deploy/helm/gosentinel \
   --set api.replicaCount=5 \
   --set backends.victoriaMetricsEndpoint=http://my-vm:8428 \
-  --set alerting.slackWebhook=https://hooks.slack.com/...
+  --set alerting.slackWebhook=https://hooks.slack.com/... \
+  --set alerting.gmailUsername=alerts@yourdomain.com \
+  --set alerting.gmailPassword=xxxx-xxxx-xxxx-xxxx \
+  --set alerting.gmailTo=oncall@yourdomain.com
+
+# Validate chart before installing
+make helm-lint
+make helm-template
 ```
 
 ---
@@ -482,11 +678,21 @@ GoSentinel implements all major industry observability patterns:
 gosentinel/
 ├── cmd/                    # Binary entrypoints
 │   ├── collector/          # OTel Collector health sidecar
-│   ├── pipeline/           # Streaming pipeline
+│   ├── pipeline/           # Streaming pipeline (correlation + anomaly + alerting)
 │   ├── api/                # gRPC + REST query API
 │   └── ui/                 # HTMX frontend
 ├── internal/               # Private packages
-│   ├── alerting/           # Rule evaluator + Slack/PagerDuty notifiers
+│   ├── alerting/           # AlertManager, notifiers, escalation, grouping, metrics
+│   │   ├── evaluator.go    # RuleEvaluator — MetricsQL state machine
+│   │   ├── manager.go      # AlertManager — routing, dedup, retry, fan-out
+│   │   ├── notifier.go     # Slack, Gmail, PagerDuty, OpsGenie, Teams, Webhook
+│   │   ├── escalation.go   # EscalationPolicy — time-based channel escalation
+│   │   ├── grouping.go     # AlertGrouper — batch correlated alerts
+│   │   ├── metrics.go      # AlertManagerMetrics — Prometheus instrumentation
+│   │   ├── routing.go      # RoutingConfig — per-rule channel map
+│   │   ├── store.go        # AlertStore + SilenceManager
+│   │   ├── notification_log.go  # NotificationLog — audit ring buffer
+│   │   └── hmac.go         # HMAC-SHA256 webhook signing
 │   ├── anomaly/            # EWMA detector + registry
 │   ├── correlation/        # Trace-metric-log stream join
 │   ├── health/             # Structured health checks
@@ -499,15 +705,23 @@ gosentinel/
 │   ├── config/             # Viper config loader
 │   ├── middleware/         # JWT, rate limiter, OTel middleware
 │   └── otel/               # OTel SDK bootstrap
+├── scripts/
+│   ├── minikube-up.sh      # Start Minikube + deploy full LGTM stack
+│   └── minikube-down.sh    # Tear down namespace or cluster
 ├── proto/                  # Protobuf definitions
 ├── gen/                    # Generated proto stubs
 ├── examples/services/      # Instrumented example microservices
 ├── config/                 # OTel Collector, Prometheus, alert rules
 ├── deploy/
-│   ├── docker/             # Dockerfiles
+│   ├── docker/             # Dockerfiles (pipeline, api, ui)
 │   ├── grafana/            # Dashboards + datasource provisioning
 │   ├── helm/gosentinel/    # Helm chart
-│   ├── k8s/                # Raw Kubernetes manifests
+│   ├── k8s/
+│   │   ├── minikube/       # Minikube manifests (00-namespace → 06-dashboard)
+│   │   ├── gosentinel/     # Production manifests (api, pipeline, ui, configmap)
+│   │   ├── monitoring/     # ServiceMonitors + PrometheusRules
+│   │   ├── network/        # NetworkPolicies
+│   │   └── rbac/           # ServiceAccounts, Roles, RoleBindings
 │   └── sql/                # Database migrations
 ├── terraform/
 │   ├── modules/            # Reusable TF modules (vpc, eks, rds, ecr, iam)
@@ -515,7 +729,8 @@ gosentinel/
 └── docs/
     ├── HLD.md              # High-Level Design
     ├── LLD.md              # Low-Level Design
-    └── adr/                # Architecture Decision Records
+    ├── architecture.md     # Component diagram + signal flow
+    └── adr/                # Architecture Decision Records (001–004)
 ```
 
 ---
@@ -527,6 +742,7 @@ gosentinel/
 ```bash
 make test           # all tests with race detector
 make test-short     # skip integration tests
+make test-alerting  # alerting package only
 make coverage       # HTML coverage report
 ```
 
@@ -535,6 +751,19 @@ make coverage       # HTML coverage report
 1. Edit `config/alert-rules.yaml`
 2. Add rule with `name`, `expr` (MetricsQL), `for`, `severity`, `notify`
 3. Restart pipeline: `go run ./cmd/pipeline/`
+
+In Minikube, update the ConfigMap and restart:
+```bash
+kubectl edit configmap gosentinel-alert-rules -n gosentinel
+kubectl rollout restart deployment/gosentinel-pipeline -n gosentinel
+```
+
+### Adding a new notification channel
+
+1. Implement `Notifier` interface in `internal/alerting/notifier.go`
+2. Add config fields to `pkg/config/config.go` and `AlertingConfig`
+3. Register in `cmd/pipeline/main.go` and `cmd/api/main.go`
+4. Add env var to `.env.example` and `deploy/k8s/minikube/01-configmap.yaml`
 
 ### Adding a new storage backend
 
@@ -546,10 +775,7 @@ make coverage       # HTML coverage report
 ### Regenerating proto stubs
 
 ```bash
-# Install buf
 go install github.com/bufbuild/buf/cmd/buf@latest
-
-# Generate
 make proto-gen
 ```
 
@@ -563,24 +789,80 @@ curl http://localhost:8428/health
 # Check: GOSENTINEL_VICTORIA_METRICS_ENDPOINT is set correctly
 ```
 
-**No traces in Jaeger**
+**No traces in Jaeger / Tempo**
 ```bash
 # Check OTel Collector is running and healthy
 curl http://localhost:13133/
 docker compose logs otel-collector
+# In Minikube:
+make minikube-logs-otel
 ```
 
 **API returns 401**
 ```bash
-# Generate a test JWT (dev only)
-go run ./tools/gen-token/ --secret=dev-secret --subject=test
+# The API requires a JWT. For local dev, set a simple secret:
+export GOSENTINEL_API_JWT_SECRET=dev-secret
+# Then generate a token (example using jwt-cli):
+jwt encode --secret dev-secret --sub test
 curl -H "Authorization: Bearer <token>" http://localhost:8080/health
 ```
 
-**Pods not starting in K8s**
+**Alert notifications not being sent**
+```bash
+# Check which channels are registered
+curl http://localhost:8080/api/v1/channels
+
+# Send a test notification
+curl -X POST http://localhost:8080/api/v1/alerts/test \
+  -H "Content-Type: application/json" \
+  -d '{"channel":"slack","severity":"warning","summary":"Test"}'
+
+# Check the notification audit log
+curl http://localhost:8080/api/v1/notifications | python3 -m json.tool
+
+# In Minikube:
+make minikube-channels
+make minikube-test-alert CHANNEL=gmail
+```
+
+**Gmail not sending**
+```bash
+# Verify App Password (NOT your account password)
+# Generate at: https://myaccount.google.com/apppasswords
+# Test SMTP connectivity:
+curl -v smtp://smtp.gmail.com:587
+```
+
+**Pods not starting in Minikube**
+```bash
+kubectl describe pod -l app=gosentinel-pipeline -n gosentinel
+kubectl logs deployment/gosentinel-pipeline -n gosentinel --previous
+# Check init container logs:
+kubectl logs deployment/gosentinel-pipeline -n gosentinel -c wait-postgres
+kubectl logs deployment/gosentinel-pipeline -n gosentinel -c db-migrate
+```
+
+**Pods not starting in production K8s**
 ```bash
 kubectl describe pod -l app.kubernetes.io/name=gosentinel-pipeline -n gosentinel
 kubectl logs -l app.kubernetes.io/name=gosentinel-pipeline -n gosentinel --previous
+```
+
+**Mimir not ready in Minikube**
+```bash
+# Mimir needs ~60s to start. Check:
+kubectl logs deployment/mimir -n gosentinel
+# If OOM killed, increase Minikube memory:
+minikube stop
+minikube start --memory=8192 --cpus=6
+```
+
+**Grafana datasources showing errors**
+```bash
+# Verify backends are healthy:
+kubectl get pods -n gosentinel | grep -E "mimir|loki|tempo|victoriametrics"
+# Re-provision datasources:
+kubectl rollout restart deployment/grafana -n gosentinel
 ```
 
 ---
